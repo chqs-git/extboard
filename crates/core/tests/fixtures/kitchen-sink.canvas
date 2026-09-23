@@ -1,0 +1,11 @@
+{
+	"nodes":[
+		{"id":"5c9ebdbf6dfbd435","x":-440,"y":-280,"width":440,"height":680,"type":"group","label":"Texto to url group"},
+		{"id":"9097dc3c3e089c93","x":-420,"y":-20,"width":400,"height":400,"type":"link","url":"https://jsoncanvas.org"},
+		{"id":"20fda28aef11540b","x":-380,"y":-260,"width":250,"height":60,"color":"4","type":"text","text":"Text Node"},
+		{"id":"97f22c4149bac242","x":80,"y":-230,"width":740,"height":400,"type":"file","file":"Table example.md"}
+	],
+	"edges":[
+		{"id":"51dba1d1c7204335","fromNode":"20fda28aef11540b","fromSide":"bottom","toNode":"9097dc3c3e089c93","toSide":"top","label":"text to url edge label"}
+	]
+}

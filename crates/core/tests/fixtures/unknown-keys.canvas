@@ -1,0 +1,14 @@
+{
+	"theme":{
+		"name":"Studio",
+		"colors":["#4b62f0","#12a594","#f4692c","#f2f4f8"]
+	},
+	"extboard":{"script":"on_click(\"n7\", || { set_theme(\"dark\"); });"},
+	"nodes":[
+		{"type":"text","text":"Red box","id":"3b4fe2054591f700","x":-420,"y":0,"width":250,"height":60,"color":"1"},
+		{"id":"a559e50dc6d68554","type":"text","text":"Blue box","extboardShape":"ngon","x":200,"y":-60,"width":250,"height":60,"color":"5"}
+	],
+	"edges":[
+		{"id":"b3a735ca54e8bb28","extboardWeight":3,"fromNode":"3b4fe2054591f700","fromSide":"right","toNode":"a559e50dc6d68554","toSide":"left"}
+	]
+}

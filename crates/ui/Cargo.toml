@@ -1,0 +1,12 @@
+[package]
+name = "extboard-ui"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Deliberately empty until phase 2. bevy arrives with default-features = false
+# and an explicit feature list; ehttp is the one HTTP client for both targets.
+# Adding bevy now would put a multi-minute build in front of every phase-1
+# `cargo test`.
+[dependencies]
