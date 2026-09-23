@@ -1,0 +1,19 @@
+[package]
+name = "extd"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# tower-http / tokio-stream / notify are still absent: nothing needs them yet.
+# tower is dev-only — `oneshot` drives the Router in tests without a socket.
+[dependencies]
+extboard-core.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+axum.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
