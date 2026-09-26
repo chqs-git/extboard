@@ -5,8 +5,54 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# Deliberately empty until phase 2. bevy arrives with default-features = false
-# and an explicit feature list; ehttp is the one HTTP client for both targets.
-# Adding bevy now would put a multi-minute build in front of every phase-1
-# `cargo test`.
 [dependencies]
+extboard-core.workspace = true
+serde_json.workspace = true
+# The one HTTP client for both targets: non-blocking on native and wasm, so
+# client.rs gets written once instead of twice.
+ehttp = "0.7"
+
+# No defaults. The `2d`/`ui` bundles pull gilrs, audio, sysinfo and the whole
+# 3D pipeline; this list is the other direction — add a feature when something
+# is missing, never trim from defaults.
+bevy = { version = "0.19", default-features = false, features = [
+  "std",
+  "async_executor",
+  "multi_threaded",
+  "bevy_asset",
+  "bevy_log",
+  # window + event loop
+  "bevy_window",
+  "bevy_winit",
+  "keyboard",
+  "mouse",
+  # 2D render path
+  "bevy_render",
+  "bevy_core_pipeline",
+  "bevy_sprite",
+  "bevy_sprite_render",
+  # text: system_font_discovery or FontSource::Monospace renders nothing (E3-T1)
+  "bevy_text",
+  "default_font",
+  "system_font_discovery",
+  # bevy_ui for the panels; system_clipboard is E5-T5's copy/paste
+  "bevy_ui",
+  "bevy_ui_render",
+  "system_clipboard",
+  # wasm build target
+  "webgl2",
+  # linux: add "x11", "wayland" — no window without them
+] }
+
+# Spike-only. `examples/text_spike.rs` is throwaway (E3-T1); these go away with
+# it, or move to [dependencies] with an explicit feature list if the egui path
+# is the one we keep.
+[dev-dependencies]
+bevy_egui = "0.42"
+egui_commonmark = "0.25"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["simd"] }
+
+# `bevy run --features dev`. dynamic_linking is the whole point (link time);
+# the rest is the inspector/hot-reload kit. Never enabled in release.
+[features]
+dev = ["bevy/dynamic_linking", "bevy/bevy_dev_tools", "bevy/file_watcher", "bevy/debug"]

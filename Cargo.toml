@@ -19,7 +19,11 @@ serde_json = { version = "1", default-features = false, features = ["std"] }
 blake3     = { version = "1", default-features = false, features = ["std"] }
 thiserror  = "2"
 clap       = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
-tokio      = { version = "1.53.1", default-features = false, features = ["sync", "rt", "rt-multi-thread", "macros", "net", "signal"] }
+tokio      = { version = "1.53.1", default-features = false, features = ["sync", "rt", "rt-multi-thread", "macros", "net", "signal", "time"] }
+tokio-stream = { version = "0.1", default-features = false, features = ["sync"] }
+# macos_fsevent is notify's default and the only backend it gates; inotify on
+# Linux is unconditional.
+notify     = { version = "8", default-features = false, features = ["macos_fsevent"] }
 # http1 only: nothing reaches us except over loopback and Tailscale's proxy,
 # and h2 would buy nothing for a single client.
 axum       = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }

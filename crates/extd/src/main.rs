@@ -1,15 +1,9 @@
-//! `extd` — the one server. axum on 127.0.0.1:7777, plus the CLI subcommands
-//! that make the model testable from a shell.
-//!
-//! See PLAN.md for the phase each module is filled in.
-
 mod api;
 mod cli;
 mod commands;
 mod events;
 mod project;
 mod store;
-mod view;
 
 use clap::Parser;
 
