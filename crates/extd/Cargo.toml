@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# tower-http / tokio-stream / notify are still absent: nothing needs them yet.
+# tower-http is still absent: nothing needs it yet.
 # tower is dev-only — `oneshot` drives the Router in tests without a socket.
 [dependencies]
 extboard-core.workspace = true
@@ -14,6 +14,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 axum.workspace = true
+tokio-stream.workspace = true
+notify.workspace = true
 
 [dev-dependencies]
 tower.workspace = true

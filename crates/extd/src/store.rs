@@ -87,6 +87,10 @@ impl Store {
         Ok(ids)
     }
 
+    pub fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
     pub fn at(dir: PathBuf) -> Self {
         Self {
             dir,
