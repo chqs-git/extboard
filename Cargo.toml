@@ -29,6 +29,8 @@ notify     = { version = "8", default-features = false, features = ["macos_fseve
 axum       = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 # Test-only: `oneshot` drives the Router without binding a socket.
 tower      = { version = "0.5", default-features = false, features = ["util"] }
+# The wasm bundle: `fs` serves it, `compression-br` squeezes it on the way out.
+tower-http = { version = "0.6", default-features = false, features = ["fs", "compression-br"] }
 
 # Native release: fast, small-ish, reproducible.
 [profile.release]

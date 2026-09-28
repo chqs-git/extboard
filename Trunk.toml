@@ -1,0 +1,6 @@
+[build]
+target = "crates/ui/index.html"
+dist = "dist"
+# Content-hashed filenames, so extd can serve the bundle with a long cache
+# header without ever handing a browser a stale wasm.
+filehash = true

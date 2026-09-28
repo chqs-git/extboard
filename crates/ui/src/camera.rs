@@ -100,7 +100,7 @@ pub fn screen_to_world(
     camera.viewport_to_world_2d(cam_global, screen).ok()
 }
 
-#[expect(dead_code, reason = "E3-T6 anchors node content with it")]
+// text.rs places its screen-space panels with it.
 pub fn world_to_screen(camera: &Camera, cam_global: &GlobalTransform, world: Vec2) -> Option<Vec2> {
     camera.world_to_viewport(cam_global, world.extend(0.0)).ok()
 }

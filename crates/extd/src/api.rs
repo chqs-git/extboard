@@ -4,19 +4,30 @@
 //!   GET  /api/spaces/{id}     the document + ETag
 //!   PUT  /api/spaces/{id}     whole doc, If-Match
 //!
+//!   GET  /v/{id}              the space as read-only HTML, no JS
+//!   GET  /f/{path}            files from the spaces dir, for the above
+//!
+//! Everything else is the wasm bundle: the hashed assets by name, and
+//! `index.html` for `/` and `/s/{space}` alike — the server never reads
+//! `{space}`, the client reads it back off `window.location`.
+//!
 
 use crate::events::{Events, events, watch};
 use crate::store::{Store, StoreError};
+use crate::view;
 use axum::extract::{Path, State};
 use axum::http::header::{CONTENT_TYPE, ETAG, IF_MATCH, IF_NONE_MATCH};
 use axum::http::{HeaderMap, HeaderName, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
 use extboard_core::{Canvas, rev, validate};
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tower_http::compression::Compression;
+use tower_http::services::{ServeDir, ServeFile};
 
 pub type AppState = Arc<App>;
 
@@ -25,31 +36,65 @@ pub struct App {
     pub events: Events,
 }
 
-pub async fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn serve(port: u16, dist: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let state: AppState = Arc::new(App {
         store: Store::new()?,
         events: Events::new(),
     });
     let _watcher = watch(state.clone())?;
 
+    if !dist.join("index.html").is_file() {
+        eprintln!(
+            "no bundle at {}: the API works, the editor 404s. `trunk build --release` first.",
+            dist.display()
+        );
+    }
+
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let listener = TcpListener::bind(addr).await?;
     println!("extd listening on http://{addr}");
 
-    axum::serve(listener, router(state))
+    axum::serve(listener, app(state, dist))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
 }
 
-fn router(state: AppState) -> Router {
+// The API plus the bundle. Split from `router` so the tests can drive the API
+// without a `dist` directory to point at.
+fn app(state: AppState, dist: PathBuf) -> Router {
+    let dir = state.store.dir().to_path_buf();
+    router(state, dir).fallback_service(bundle(dist))
+}
+
+/// A hashed asset by name, and `index.html` for every other unmatched path, so
+/// `/s/{space}` needs no route of its own. Compression is on this service and
+/// not the router: brotli across `/api/events` would sit on the SSE frames.
+fn bundle(dist: PathBuf) -> Compression<ServeDir<ServeFile>> {
+    let index = ServeFile::new(dist.join("index.html"));
+    Compression::new(ServeDir::new(dist).fallback(index)).br(true)
+}
+
+fn router(state: AppState, dir: PathBuf) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/spaces", get(list_spaces))
         .route("/api/spaces/{id}", get(get_space))
         .route("/api/spaces/{id}", put(put_space))
         .route("/api/events", get(events))
+        .route("/v/{id}", get(view_space))
+        .nest_service("/f", ServeDir::new(dir))
         .with_state(state)
+}
+
+// The phone path: one page, no JS, no fetches.
+async fn view_space(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Html<String>, StoreError> {
+    let space = app.store.space(&id)?;
+    let canvas = space.read().await.load()?;
+    Ok(Html(view::page(&id, &canvas)))
 }
 
 /// GET endpoints
@@ -176,6 +221,31 @@ mod tests {
         })
     }
 
+    // The bundle answers every path the API does not claim, and claims none of
+    // the API's own. Getting that wrong serves HTML to the client's fetches.
+    #[tokio::test]
+    async fn unmatched_paths_get_the_bundle_and_api_paths_do_not() {
+        let dir = std::env::temp_dir().join("extboard-bundle-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.html"), "<!doctype html>bundle").unwrap();
+        let app = || app(state(dir.clone()), dir.clone());
+
+        for path in ["/", "/s/kitchen-sink", "/s/anything"] {
+            let got = app()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(got.status(), StatusCode::OK, "{path}");
+        }
+
+        let api = app()
+            .oneshot(Request::get("/api/spaces").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(api.headers()[CONTENT_TYPE], "application/json");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     // `oneshot` feeds one request straight into the Router and returns the
     // response — no socket, no port, no runtime teardown. This is the way to
     // test axum handlers.
@@ -183,7 +253,7 @@ mod tests {
     async fn health_is_ok() {
         let dir = std::env::temp_dir().join("extboard-health-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let app = router(state(dir.clone()));
+        let app = router(state(dir.clone()), dir.clone());
 
         let response = app
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
@@ -201,7 +271,7 @@ mod tests {
         for name in ["b.canvas", "a.canvas", "notes.md"] {
             std::fs::write(dir.join(name), "{}").unwrap();
         }
-        let app = router(state(dir.clone()));
+        let app = router(state(dir.clone()), dir.clone());
 
         let response = app
             .oneshot(Request::get("/api/spaces").body(Body::empty()).unwrap())
@@ -231,10 +301,10 @@ mod tests {
             if let Some(etag) = etag {
                 req = req.header(IF_MATCH, etag);
             }
-            router(state.clone()).oneshot(req.body(Body::from(body)).unwrap())
+            router(state.clone(), dir.clone()).oneshot(req.body(Body::from(body)).unwrap())
         };
 
-        let got = router(state.clone())
+        let got = router(state.clone(), dir.clone())
             .oneshot(Request::get("/api/spaces/a").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -290,7 +360,7 @@ mod tests {
         std::fs::write(dir.join("a.canvas"), r#"{"nodes":[],"edges":[]}"#).unwrap();
         let state: AppState = state(dir.clone());
 
-        let got = router(state.clone())
+        let got = router(state.clone(), dir.clone())
             .oneshot(Request::get("/api/spaces/a").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -300,7 +370,7 @@ mod tests {
         assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
 
         // Same rev in hand: nothing transferred.
-        let cached = router(state.clone())
+        let cached = router(state.clone(), dir.clone())
             .oneshot(
                 Request::get("/api/spaces/a")
                     .header(IF_NONE_MATCH, &etag)
@@ -312,7 +382,7 @@ mod tests {
         assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
 
         // A stale rev still gets the document.
-        let stale = router(state.clone())
+        let stale = router(state.clone(), dir.clone())
             .oneshot(
                 Request::get("/api/spaces/a")
                     .header(IF_NONE_MATCH, "\"0000000000000000\"")
@@ -323,7 +393,7 @@ mod tests {
             .unwrap();
         assert_eq!(stale.status(), StatusCode::OK);
 
-        let missing = router(state.clone())
+        let missing = router(state.clone(), dir.clone())
             .oneshot(
                 Request::get("/api/spaces/nope")
                     .body(Body::empty())
@@ -334,7 +404,7 @@ mod tests {
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         assert_eq!(missing.headers()[CONTENT_TYPE], "application/json");
 
-        let bad = router(state)
+        let bad = router(state, dir.clone())
             .oneshot(
                 Request::get("/api/spaces/.hidden")
                     .body(Body::empty())

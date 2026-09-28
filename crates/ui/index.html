@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>ext.board</title>
+<!-- wasm-bindgen drops the target_features section, so wasm-opt falls back to
+     MVP and rejects rustc's bulk-memory ops. These six are exactly what
+     `rustc --target wasm32-unknown-unknown --print cfg` reports. -->
+<link data-trunk rel="rust" data-bin="extboard-ui" data-wasm-opt="z"
+      data-wasm-opt-params="--strip-debug --enable-bulk-memory --enable-bulk-memory-opt --enable-multivalue --enable-mutable-globals --enable-nontrapping-float-to-int --enable-reference-types --enable-sign-ext" />
+<style>
+  html, body { margin: 0; height: 100%; background: #12121a; overflow: hidden; }
+  /* Bevy sizes the canvas from the window; without this it keeps its own
+     aspect ratio and letterboxes inside the viewport. */
+  canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body></body>
+</html>

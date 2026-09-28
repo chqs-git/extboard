@@ -25,6 +25,13 @@ impl Plugin for NodePlugin {
     }
 }
 
+/// Canvas space -> Bevy world: JSONCanvas +y is down and (x, y) is a node's
+/// top-left corner; Bevy +y is up and a Transform is the centre of the mesh.
+/// Every conversion goes through here, so there is one place to be wrong.
+pub fn to_world(canvas: Vec2) -> Vec2 {
+    Vec2::new(canvas.x, -canvas.y)
+}
+
 // trigger on canvas changes; sync nodes
 fn spawn_nodes(
     mut commands: Commands,
@@ -47,12 +54,31 @@ fn spawn_nodes(
             },
             NodeKind(node.kind.clone()),
             Mesh2d(meshes.add(Rectangle::new(node.width as f32, node.height as f32))),
-            MeshMaterial2d(materials.add(Color::hsl(360., 0.95, 0.7))),
-            Transform::from_xyz(
-                node.x as f32 + node.width as f32 / 2.0,
-                -(node.y as f32 + node.height as f32 / 2.0),
-                0.0,
+            MeshMaterial2d(materials.add(node_color(&node.kind))),
+            Transform::from_translation(
+                to_world(Vec2::new(
+                    node.x as f32 + node.width as f32 / 2.0,
+                    node.y as f32 + node.height as f32 / 2.0,
+                ))
+                .extend(depth(node)),
             ),
         ));
+    }
+}
+
+// Bigger rects sit behind smaller ones, so a group never hides what is inside
+// it. All within (-1, 0), leaving z=1 for edge labels.
+fn depth(node: &extboard_core::Node) -> f32 {
+    -(node.width as f32 * node.height as f32) / 1.0e6
+}
+
+// Placeholder palette: enough to tell the four kinds apart. The real one is
+// E6 — `node.color` is a palette index string, not a hex code.
+fn node_color(kind: &extboard_core::NodeKind) -> Color {
+    match kind {
+        extboard_core::NodeKind::Text { .. } => Color::hsl(210.0, 0.45, 0.58),
+        extboard_core::NodeKind::File { .. } => Color::hsl(150.0, 0.40, 0.48),
+        extboard_core::NodeKind::Link { .. } => Color::hsl(285.0, 0.40, 0.60),
+        extboard_core::NodeKind::Group { .. } => Color::hsl(220.0, 0.15, 0.26),
     }
 }

@@ -10,7 +10,9 @@ extboard-core.workspace = true
 serde_json.workspace = true
 # The one HTTP client for both targets: non-blocking on native and wasm, so
 # client.rs gets written once instead of twice.
-ehttp = "0.7"
+ehttp = { version = "0.7", features = ["streaming"] }
+# Node markdown (E3-T6).
+pulldown-cmark = { version = "0.13", default-features = false, features = ["simd"] }
 
 # No defaults. The `2d`/`ui` bundles pull gilrs, audio, sysinfo and the whole
 # 3D pipeline; this list is the other direction — add a feature when something
@@ -18,7 +20,6 @@ ehttp = "0.7"
 bevy = { version = "0.19", default-features = false, features = [
   "std",
   "async_executor",
-  "multi_threaded",
   "bevy_asset",
   "bevy_log",
   # window + event loop
@@ -31,6 +32,9 @@ bevy = { version = "0.19", default-features = false, features = [
   "bevy_core_pipeline",
   "bevy_sprite",
   "bevy_sprite_render",
+  # E3-T5 draws edges in immediate mode; no meshes, no entities
+  "bevy_gizmos",
+  "bevy_gizmos_render",
   # text: system_font_discovery or FontSource::Monospace renders nothing (E3-T1)
   "bevy_text",
   "default_font",
@@ -39,18 +43,20 @@ bevy = { version = "0.19", default-features = false, features = [
   "bevy_ui",
   "bevy_ui_render",
   "system_clipboard",
-  # wasm build target
-  "webgl2",
   # linux: add "x11", "wayland" — no window without them
 ] }
 
-# Spike-only. `examples/text_spike.rs` is throwaway (E3-T1); these go away with
-# it, or move to [dependencies] with an explicit feature list if the egui path
-# is the one we keep.
-[dev-dependencies]
-bevy_egui = "0.42"
-egui_commonmark = "0.25"
-pulldown-cmark = { version = "0.13", default-features = false, features = ["simd"] }
+# Cargo unions features per dependency across target sections, so these add to
+# the list above rather than replacing it. A wasm tab gets no threads without
+# cross-origin isolation, so multi_threaded is dead bytes there.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+bevy = { version = "0.19", default-features = false, features = ["multi_threaded"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+bevy = { version = "0.19", default-features = false, features = ["webgl2"] }
+# Already in the tree under bevy; this is the two features `space_id` needs to
+# read `/s/{id}` back out of the URL extd served the page under.
+web-sys = { version = "0.3", features = ["Window", "Location"] }
 
 # `bevy run --features dev`. dynamic_linking is the whole point (link time);
 # the rest is the inspector/hot-reload kit. Never enabled in release.

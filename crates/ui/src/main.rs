@@ -2,6 +2,8 @@ mod camera;
 mod client;
 mod hud;
 mod node;
+mod scene;
+mod text;
 
 use bevy::prelude::*;
 use bevy::window::PresentMode;
@@ -22,6 +24,8 @@ fn main() {
             client::ClientPlugin,
             hud::HudPlugin,
             node::NodePlugin,
+            scene::ScenePlugin,
+            text::TextPlugin,
         ))
         .run();
 }

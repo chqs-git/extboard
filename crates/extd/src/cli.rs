@@ -18,6 +18,11 @@ pub enum Command {
         // Port to bind on 127.0.0.1.
         #[arg(long, default_value_t = 7777)]
         port: u16,
+
+        // Where `trunk build` left the wasm bundle. Not embedded in the binary:
+        // a 70MB asset in the crate would make every `cargo build` wear it.
+        #[arg(long, default_value = "dist")]
+        dist: PathBuf,
     },
 
     // Parse, validate and rewrite a .canvas file in our format.
@@ -72,7 +77,10 @@ mod tests {
 
         fmt(&path, false).unwrap();
         let once = fs::read_to_string(&path).unwrap();
-        assert!(fmt(&path, true).is_ok(), "settled file still reports unformatted");
+        assert!(
+            fmt(&path, true).is_ok(),
+            "settled file still reports unformatted"
+        );
         fmt(&path, false).unwrap();
 
         assert_eq!(once, fs::read_to_string(&path).unwrap());

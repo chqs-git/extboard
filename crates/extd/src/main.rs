@@ -4,6 +4,7 @@ mod commands;
 mod events;
 mod project;
 mod store;
+mod view;
 
 use clap::Parser;
 
@@ -18,7 +19,7 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     match cli::Cli::parse().command {
-        cli::Command::Serve { port } => api::serve(port).await?,
+        cli::Command::Serve { port, dist } => api::serve(port, dist).await?,
         cli::Command::Fmt { file, check } => cli::fmt(&file, check)?,
     }
     Ok(())

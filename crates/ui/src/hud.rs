@@ -17,6 +17,8 @@ impl Plugin for HudPlugin {
 fn spawn_fps(mut commands: Commands) {
     commands.spawn((
         FpsText,
+        // Node panels are UI too and spawn later.
+        GlobalZIndex(1),
         Text::new("-- fps"),
         TextFont::from_font_size(14.0),
         TextColor(Color::srgb(0.45, 0.5, 0.55)),
