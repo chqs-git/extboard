@@ -50,7 +50,10 @@ fn press(
         match (add, selected.contains(entity)) {
             (true, true) => commands.entity(entity).remove::<Selected>(),
             (true, false) => commands.entity(entity).insert(Selected),
-            (false, _) => return replace(&mut commands, &selected, &[entity]),
+            // Already selected: leave the rest of the selection alone, the
+            // press is the start of dragging all of it.
+            (false, true) => return,
+            (false, false) => return replace(&mut commands, &selected, &[entity]),
         };
         return;
     }
@@ -134,21 +137,18 @@ fn replace(commands: &mut Commands, selected: &Query<Entity, With<Selected>>, ke
     }
 }
 
-fn cursor_world(
+pub fn cursor_world(
     window: &Window,
     (camera, cam_global): (&Camera, &GlobalTransform),
 ) -> Option<Vec2> {
     screen_to_world(camera, cam_global, window.cursor_position()?)
 }
 
-fn bounds(transform: &Transform, node: &NodeRect) -> Rect {
-    Rect::from_center_size(
-        transform.translation.truncate(),
-        Vec2::new(node.w as f32, node.h as f32),
-    )
+pub fn bounds(transform: &Transform, node: &NodeRect) -> Rect {
+    Rect::from_center_size(transform.translation.truncate(), node.size())
 }
 
-fn pick<T>(candidates: impl Iterator<Item = (T, Rect, f32)>, point: Vec2) -> Option<T> {
+pub fn pick<T>(candidates: impl Iterator<Item = (T, Rect, f32)>, point: Vec2) -> Option<T> {
     candidates
         .filter(|(_, rect, _)| rect.contains(point))
         .max_by(|a, b| a.2.total_cmp(&b.2))

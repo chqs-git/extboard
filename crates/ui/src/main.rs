@@ -1,5 +1,6 @@
 mod camera;
 mod client;
+mod edit;
 mod hud;
 mod node;
 mod scene;
@@ -23,6 +24,7 @@ fn main() {
         .add_plugins((
             camera::CameraPlugin,
             client::ClientPlugin,
+            edit::EditPlugin,
             hud::HudPlugin,
             node::NodePlugin,
             scene::ScenePlugin,

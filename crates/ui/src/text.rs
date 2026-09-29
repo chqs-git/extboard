@@ -1,5 +1,3 @@
-// Node markdown: `pulldown-cmark` into blocks, blocks into `bevy_ui`.
-
 use bevy::camera::CameraUpdateSystems;
 use bevy::prelude::*;
 use bevy::text::{FontStyle, FontWeight};
@@ -7,10 +5,11 @@ use bevy::transform::TransformSystems;
 use bevy::ui::UiSystems;
 use extboard_core::{Node as CanvasNode, NodeKind};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use std::collections::HashMap;
 
 use crate::camera::world_to_screen;
 use crate::client::Document;
-use crate::node::to_world;
+use crate::node::{NodeId, NodeRect};
 
 // global mk settings
 const PADDING: f32 = 12.0;
@@ -29,16 +28,13 @@ pub struct TextPlugin;
 
 // Two nodes because bevy clips to the *laid-out* box and never to the
 // transformed one: the clip box takes the zoom in layout, the content in scale.
+// Both hold the node id rather than a position: a drag moves the node entity,
+// and the panel has to go with it.
 #[derive(Component)]
-struct ClipBox {
-    center: Vec2,
-    size: Vec2,
-}
+struct ClipBox(String);
 
 #[derive(Component)]
-struct Content {
-    size: Vec2,
-}
+struct Content(String);
 
 impl Plugin for TextPlugin {
     fn build(&self, app: &mut App) {
@@ -80,14 +76,10 @@ fn spawn_panels(
             continue;
         };
         let size = Vec2::new(node.width as f32, node.height as f32);
-        let center = to_world(Vec2::new(
-            node.x as f32 + size.x / 2.0,
-            node.y as f32 + size.y / 2.0,
-        ));
         let blocks = blocks(md);
         commands
             .spawn((
-                ClipBox { center, size },
+                ClipBox(node.id.clone()),
                 Node {
                     position_type: PositionType::Absolute,
                     width: px(size.x),
@@ -99,7 +91,7 @@ fn spawn_panels(
             .with_children(|parent| {
                 parent
                     .spawn((
-                        Content { size },
+                        Content(node.id.clone()),
                         // Absolute: a flex child would be shrunk to fit below 100%.
                         Node {
                             position_type: PositionType::Absolute,
@@ -118,10 +110,9 @@ fn spawn_panels(
     }
 }
 
-/// Follow the camera. Scaling magnifies the glyph atlas instead of re-rasterising
-/// it, so text softens as zoom climbs; `UiScale` is the crisp but global swap.
 fn track_panels(
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
+    nodes: Query<(&NodeId, &Transform, &NodeRect)>,
     mut clip_boxes: Query<(&ClipBox, &mut Node)>,
     mut contents: Query<(&Content, &mut UiTransform)>,
 ) {
@@ -130,12 +121,24 @@ fn track_panels(
         return;
     };
     let zoom = 1.0 / ortho.scale;
+    let placed: HashMap<&str, (Vec2, Vec2)> = nodes
+        .iter()
+        .map(|(id, transform, rect)| {
+            (
+                id.0.as_str(),
+                (transform.translation.truncate(), rect.size()),
+            )
+        })
+        .collect();
 
     for (clip_box, mut node) in &mut clip_boxes {
-        let Some(screen) = world_to_screen(camera, cam_global, clip_box.center) else {
+        let Some(&(center, size)) = placed.get(clip_box.0.as_str()) else {
             continue;
         };
-        let scaled = clip_box.size * zoom;
+        let Some(screen) = world_to_screen(camera, cam_global, center) else {
+            continue;
+        };
+        let scaled = size * zoom;
         let want = (
             px(screen.x - scaled.x / 2.0),
             px(screen.y - scaled.y / 2.0),
@@ -149,7 +152,10 @@ fn track_panels(
     }
 
     for (content, mut transform) in &mut contents {
-        let offset = centre_scale_offset(content.size, zoom);
+        let Some(&(_, size)) = placed.get(content.0.as_str()) else {
+            continue;
+        };
+        let offset = centre_scale_offset(size, zoom);
         let want = UiTransform {
             scale: Vec2::splat(zoom),
             translation: Val2::px(offset.x, offset.y),
@@ -190,7 +196,6 @@ struct Cell {
     head: bool,
 }
 
-/// Counts, not flags: `**bold *and* italic**` closes the inner tag first.
 #[derive(Default)]
 struct Marks {
     size: f32,
