@@ -3,6 +3,7 @@ mod client;
 mod hud;
 mod node;
 mod scene;
+mod select;
 mod text;
 
 use bevy::prelude::*;
@@ -25,6 +26,7 @@ fn main() {
             hud::HudPlugin,
             node::NodePlugin,
             scene::ScenePlugin,
+            select::SelectPlugin,
             text::TextPlugin,
         ))
         .run();

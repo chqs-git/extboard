@@ -91,7 +91,7 @@ fn zoom_anchored(cam: Vec2, anchor: Vec2, old: f32, new: f32) -> Vec2 {
     anchor - (anchor - cam) * (new / old)
 }
 
-#[expect(dead_code, reason = "E5 hit-tests with it")]
+// select.rs hit-tests with it.
 pub fn screen_to_world(
     camera: &Camera,
     cam_global: &GlobalTransform,
