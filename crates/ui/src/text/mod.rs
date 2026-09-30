@@ -1,19 +1,21 @@
 use bevy::camera::CameraUpdateSystems;
 use bevy::input::InputSystems;
-use bevy::input_focus::AutoFocus;
 use bevy::prelude::*;
-use bevy::text::{EditableText, FontStyle, FontWeight, TextCursorStyle};
+use bevy::text::{FontStyle, FontWeight};
 use bevy::transform::TransformSystems;
 use bevy::ui::UiSystems;
-use extboard_core::{Canvas, Node as CanvasNode, NodeKind};
+use extboard_core::{Node as CanvasNode, NodeKind};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::collections::HashMap;
 
 use crate::camera::world_to_screen;
 use crate::client::Document;
-use crate::edit::double_click;
 use crate::node::{NodeId, NodeRect};
-use crate::select::{bounds, cursor_world, pick};
+
+mod edit_text;
+
+pub use edit_text::{Editing, editing};
+use edit_text::{editor, toggle};
 
 // global mk settings
 const PADDING: f32 = 12.0;
@@ -39,16 +41,6 @@ struct ClipBox(String);
 
 #[derive(Component)]
 struct Content(String);
-
-#[derive(Resource, Default)]
-pub struct Editing(pub Option<String>);
-
-#[derive(Component)]
-struct Editor;
-
-pub fn editing(editing: Res<Editing>) -> bool {
-    editing.0.is_some()
-}
 
 impl Plugin for TextPlugin {
     fn build(&self, app: &mut App) {
@@ -145,131 +137,6 @@ fn spawn_panels(
             });
     }
 }
-
-// Source while editing, rendered at rest: the buffer is the node's raw markdown,
-// and the styled span tree is never edited.
-fn editor(md: &str) -> impl Bundle {
-    (
-        Editor,
-        // Fills the content box; the clip box above it does the clipping.
-        Node {
-            width: percent(100.0),
-            height: percent(100.0),
-            ..default()
-        },
-        EditableText {
-            allow_newlines: true,
-            // The node's own height, not a line count.
-            visible_lines: None,
-            ..EditableText::new(md)
-        },
-        TextLayout {
-            linebreak: LineBreak::WordOrCharacter,
-            ..default()
-        },
-        TextFont::from_font_size(BODY),
-        TextColor(FG),
-        // The default caret is slate, which on a coloured node rect is invisible.
-        TextCursorStyle {
-            color: FG,
-            ..default()
-        },
-        AutoFocus,
-    )
-}
-
-// Double-click a text node to edit it; escape or a click away ends the session
-// and writes the buffer back.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "a system's arguments are its query"
-)]
-fn toggle(
-    time: Res<Time>,
-    buttons: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    window: Single<&Window>,
-    camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
-    nodes: Query<(&NodeId, &Transform, &NodeRect)>,
-    editors: Query<&EditableText, With<Editor>>,
-    mut document: ResMut<Document>,
-    mut editing: ResMut<Editing>,
-    mut last: Local<Option<(f32, Vec2)>>,
-) {
-    let world = cursor_world(&window, *camera);
-
-    if let Some(id) = editing.0.clone() {
-        let away = buttons.just_pressed(MouseButton::Left)
-            && !world.is_some_and(|world| {
-                node_rect(&nodes, &id).is_some_and(|rect| rect.contains(world))
-            });
-        if !away && !keys.just_pressed(KeyCode::Escape) {
-            return;
-        }
-        // One document mutation per session, and only if something was typed:
-        // waking the document respawns every node and panel.
-        if let Ok(editor) = editors.single()
-            && written_back(
-                &mut document.bypass_change_detection().0,
-                &id,
-                &editor.value().to_string(),
-            )
-        {
-            document.set_changed();
-        }
-        editing.0 = None;
-        return;
-    }
-
-    if !buttons.just_pressed(MouseButton::Left) || keys.pressed(KeyCode::Space) {
-        return;
-    }
-    let (Some(world), Some(screen)) = (world, window.cursor_position()) else {
-        return;
-    };
-    if !double_click(&mut last, time.elapsed_secs(), screen) {
-        return;
-    }
-    let Some(id) = pick(
-        nodes
-            .iter()
-            .map(|(id, transform, rect)| (&id.0, bounds(transform, rect), transform.translation.z)),
-        world,
-    ) else {
-        return;
-    };
-    // Only a text node has markdown to edit.
-    if document
-        .0
-        .nodes
-        .iter()
-        .any(|node| &node.id == id && markdown(node).is_some())
-    {
-        editing.0 = Some(id.clone());
-    }
-}
-
-fn node_rect(nodes: &Query<(&NodeId, &Transform, &NodeRect)>, id: &str) -> Option<Rect> {
-    nodes
-        .iter()
-        .find(|(node, _, _)| node.0 == id)
-        .map(|(_, transform, rect)| bounds(transform, rect))
-}
-
-// `true` when the buffer differed, so only a real edit wakes the document.
-fn written_back(canvas: &mut Canvas, id: &str, text: &str) -> bool {
-    let Some(node) = canvas.nodes.iter_mut().find(|node| node.id == id) else {
-        return false;
-    };
-    match &mut node.kind {
-        NodeKind::Text { text: buffer } if buffer != text => {
-            *buffer = text.to_owned();
-            true
-        }
-        _ => false,
-    }
-}
-
 fn track_panels(
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(&NodeId, &Transform, &NodeRect)>,
@@ -578,144 +445,4 @@ fn color(span: &Span) -> Color {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // The scaled content's corner, relative to the clip box's. Non-zero clips.
-    fn content_top_left(size: Vec2, zoom: f32) -> Vec2 {
-        let center = size / 2.0 + centre_scale_offset(size, zoom);
-        center - size * zoom / 2.0
-    }
-
-    fn canvas(text: &str) -> Canvas {
-        Canvas {
-            nodes: vec![CanvasNode {
-                id: "n".to_owned(),
-                x: 0,
-                y: 0,
-                width: 200,
-                height: 100,
-                color: None,
-                kind: NodeKind::Text {
-                    text: text.to_owned(),
-                },
-                extra: default(),
-            }],
-            edges: Vec::new(),
-            extra: default(),
-        }
-    }
-
-    #[test]
-    fn only_a_changed_buffer_is_written_back() {
-        let mut got = canvas("before");
-        assert!(written_back(&mut got, "n", "after"));
-        assert_eq!(markdown(&got.nodes[0]), Some("after"));
-
-        // Opened and closed without typing: the document must not be woken.
-        assert!(!written_back(&mut got, "n", "after"));
-        // And a node that is gone, or was never text, is not an error.
-        assert!(!written_back(&mut got, "gone", "after"));
-    }
-
-    #[test]
-    fn content_fills_its_clip_box_at_every_zoom() {
-        let size = Vec2::new(740.0, 460.0);
-        for zoom in [0.25, 0.5, 1.0, 2.0, 8.0] {
-            let corner = content_top_left(size, zoom);
-            assert!(corner.abs().max_element() < 1e-3, "zoom {zoom}: {corner}");
-        }
-    }
-
-    fn line(blocks: &[Block], index: usize) -> &[Span] {
-        match &blocks[index] {
-            Block::Line(spans) => spans,
-            other => panic!("block {index} is {other:?}, not a line"),
-        }
-    }
-
-    #[test]
-    fn inline_runs_keep_their_marks() {
-        let got = blocks("plain *em* **strong** `code()` [link](https://bevy.org)");
-        let spans = line(&got, 0);
-        let marks: Vec<_> = spans
-            .iter()
-            .map(|s| (s.text.as_str(), s.bold, s.italic, s.mono, s.link))
-            .collect();
-        assert_eq!(
-            marks,
-            [
-                ("plain ", false, false, false, false),
-                ("em", false, true, false, false),
-                (" ", false, false, false, false),
-                ("strong", true, false, false, false),
-                (" ", false, false, false, false),
-                ("code()", false, false, true, false),
-                (" ", false, false, false, false),
-                ("link", false, false, false, true),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_heading_is_bold_and_bigger_than_the_body() {
-        let got = blocks("# Title\n\nbody\n");
-        let title = &line(&got, 0)[0];
-        assert!(title.bold && title.size > BODY, "{title:?}");
-        assert_eq!(line(&got, 1)[0].size, BODY);
-    }
-
-    #[test]
-    fn nested_emphasis_closes_inside_out() {
-        let got = blocks("**bold *both* tail**");
-        let spans = line(&got, 0);
-        assert!(spans.iter().all(|s| s.bold), "{spans:?}");
-        assert_eq!(
-            spans
-                .iter()
-                .filter(|s| s.italic)
-                .map(|s| &s.text)
-                .collect::<Vec<_>>(),
-            ["both"]
-        );
-    }
-
-    #[test]
-    fn a_table_becomes_a_grid_of_cells_in_row_order() {
-        let got =
-            blocks("| crate | verdict |\n|---|---|\n| bevy | parley |\n| pulldown | tables |\n");
-        let Block::Table { cols, cells } = &got[0] else {
-            panic!("{got:?}");
-        };
-        assert_eq!(*cols, 2);
-        assert_eq!(cells.len(), 6, "2 columns x 3 rows");
-        assert_eq!(
-            cells
-                .iter()
-                .map(|c| (c.text.as_str(), c.head))
-                .collect::<Vec<_>>(),
-            [
-                ("crate", true),
-                ("verdict", true),
-                ("bevy", false),
-                ("parley", false),
-                ("pulldown", false),
-                ("tables", false),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_code_block_keeps_its_newlines_and_drops_the_trailing_one() {
-        let got = blocks("```rust\nfn main() {\n    ok();\n}\n```\n");
-        assert_eq!(got, [Block::Code("fn main() {\n    ok();\n}".to_owned())]);
-    }
-
-    #[test]
-    fn list_items_are_one_line_each_with_a_bullet() {
-        let got = blocks("- first\n- second **bold**\n");
-        assert_eq!(got.len(), 2);
-        assert_eq!(line(&got, 0)[0].text, "- ");
-        assert_eq!(line(&got, 1).last().unwrap().text, "bold");
-    }
-}
+mod tests;
