@@ -7,6 +7,7 @@ mod scene;
 mod select;
 mod sync;
 mod text;
+mod undo;
 
 use bevy::prelude::*;
 use bevy::window::PresentMode;
@@ -32,6 +33,7 @@ fn main() {
             select::SelectPlugin,
             sync::SyncPlugin,
             text::TextPlugin,
+            undo::UndoPlugin,
         ))
         .run();
 }
