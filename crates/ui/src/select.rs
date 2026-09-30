@@ -3,7 +3,7 @@ use bevy::prelude::*;
 
 use crate::camera::screen_to_world;
 use crate::client::Document;
-use crate::edit::{MIN_SIZE, created};
+use crate::edit::{MIN_SIZE, anchor_under, created, rects};
 use crate::node::NodeRect;
 
 const OUTLINE: Color = Color::srgb(0.95, 0.75, 0.30);
@@ -65,17 +65,22 @@ fn press(
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     window: Single<&Window>,
-    camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(Entity, &Transform, &NodeRect)>,
     selected: Query<Entity, With<Selected>>,
 ) {
+    let (camera, cam_global, projection) = *camera;
     // Space+left is the camera's pan grab.
     if !buttons.just_pressed(MouseButton::Left) || keys.pressed(KeyCode::Space) {
         return;
     }
-    let Some(world) = cursor_world(&window, *camera) else {
+    let Some(world) = cursor_world(&window, (camera, cam_global)) else {
         return;
     };
+    // An anchor showing off a node's side is edit.rs's edge drag, not a sweep.
+    if anchor_under(rects(&nodes), projection, world, false).is_some() {
+        return;
+    }
     let add = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
 
     if let Some(entity) = pick(
