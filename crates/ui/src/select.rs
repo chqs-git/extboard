@@ -1,26 +1,63 @@
+use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 
 use crate::camera::screen_to_world;
+use crate::client::Document;
+use crate::edit::{MIN_SIZE, created};
 use crate::node::NodeRect;
 
 const OUTLINE: Color = Color::srgb(0.95, 0.75, 0.30);
 const BAND: Color = Color::srgb(0.55, 0.65, 0.80);
+// Shift turns the sweep into the outline of a new node: a white edge over the
+// wash that shows the node's footprint.
+const BAND_CREATE: Color = Color::WHITE;
+// The knob: over empty canvas there is nothing behind the wash, so the alpha is
+// only how light the block reads. Sweep it over a node to see it blend.
+const BAND_FILL: Color = Color::srgba(0.55, 0.65, 0.80, 0.1);
+// Above the node rects and the edge labels: it is an overlay on all of them.
+const BAND_Z: f32 = 2.0;
 
 pub struct SelectPlugin;
 
 #[derive(Component)]
 pub struct Selected;
 
+// Gizmos draw lines, not fills, so the wash is one quad, the same unit mesh
+// node.rs scales. It lives for the whole run and hides itself: spawning per
+// gesture would lag a frame behind.
+#[derive(Component)]
+struct BandFill;
+
 #[derive(Resource)]
 struct Band {
     start: Vec2,
     base: Vec<Entity>,
+    // Shift already means additive, so a band that began with it stays a sweep.
+    additive: bool,
+    // The rect to become a node on release, while shift is down.
+    creating: Option<Rect>,
 }
 
 impl Plugin for SelectPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (press, drag_band, release, outline).chain());
+        app.add_systems(Startup, spawn_fill)
+            .add_systems(Update, (press, drag_band, release, outline).chain());
     }
+}
+
+fn spawn_fill(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    commands.spawn((
+        BandFill,
+        Mesh2d(meshes.add(Rectangle::from_length(1.0))),
+        // ColorMaterial reads the alpha and blends; a Sprite draws it opaque.
+        MeshMaterial2d(materials.add(BAND_FILL)),
+        Transform::from_xyz(0.0, 0.0, BAND_Z),
+        Visibility::Hidden,
+    ));
 }
 
 fn press(
@@ -64,30 +101,63 @@ fn press(
         Vec::new()
     };
     replace(&mut commands, &selected, &base);
-    commands.insert_resource(Band { start: world, base });
+    commands.insert_resource(Band {
+        start: world,
+        base,
+        additive: add,
+        creating: None,
+    });
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    reason = "a system's arguments are its query"
+)]
 fn drag_band(
     mut commands: Commands,
     mut gizmos: Gizmos,
-    band: Option<Res<Band>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    band: Option<ResMut<Band>>,
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     nodes: Query<(Entity, &Transform, &NodeRect)>,
     selected: Query<Entity, With<Selected>>,
+    // Without<NodeRect>: `nodes` wants a Transform too, and only one of the two
+    // may have it mutably.
+    fill: Single<(&mut Transform, &mut Visibility), (With<BandFill>, Without<NodeRect>)>,
 ) {
-    let Some(band) = band else {
+    let (mut fill_transform, mut fill_visibility) = fill.into_inner();
+    let Some(mut band) = band else {
+        fill_visibility.set_if_neq(Visibility::Hidden);
         return;
     };
     let Some(world) = cursor_world(&window, *camera) else {
         return;
     };
     let rect = Rect::from_corners(band.start, world);
+    let creating = !band.additive && keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     gizmos.rect_2d(
         Isometry2d::from_translation(rect.center()),
         rect.size(),
-        BAND,
+        if creating { BAND_CREATE } else { BAND },
     );
+    if creating {
+        fill_transform.translation = rect.center().extend(BAND_Z);
+        fill_transform.scale = rect.size().extend(1.0);
+    }
+    fill_visibility.set_if_neq(if creating {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    });
+
+    // Drawing a node, not sweeping one up: leave the selection where it was, so
+    // letting shift go puts the sweep back exactly as it stood.
+    band.creating = creating.then_some(rect);
+    if creating {
+        return;
+    }
 
     // A despawn between frames would leave a dangling id in `base`.
     let mut keep: Vec<Entity> = band
@@ -108,11 +178,27 @@ fn drag_band(
 fn release(
     mut commands: Commands,
     buttons: Res<ButtonInput<MouseButton>>,
+    frames: Res<FrameCount>,
     band: Option<Res<Band>>,
+    document: Option<ResMut<Document>>,
 ) {
-    if band.is_some() && !buttons.pressed(MouseButton::Left) {
-        commands.remove_resource::<Band>();
+    let Some(band) = band else {
+        return;
+    };
+    if buttons.pressed(MouseButton::Left) {
+        return;
     }
+    if let (Some(rect), Some(mut document)) = (band.creating, document)
+        && big_enough(rect)
+    {
+        created(&mut document.0, frames.0, rect);
+    }
+    commands.remove_resource::<Band>();
+}
+
+// A band this small is a slipped click, not a node someone drew.
+fn big_enough(rect: Rect) -> bool {
+    rect.size().min_element() >= MIN_SIZE
 }
 
 fn outline(mut gizmos: Gizmos, selected: Query<(&Transform, &NodeRect), With<Selected>>) {
@@ -176,6 +262,35 @@ mod tests {
             Some(0)
         );
         assert_eq!(pick([card].into_iter(), Vec2::new(150.0, 0.0)), None);
+    }
+
+    // Both queries want a Transform and one wants it mutably; Bevy panics on
+    // that at system init, which is a running app, not a compile.
+    #[test]
+    fn the_fill_and_the_node_queries_stay_disjoint() {
+        let mut app = App::new();
+        // Nothing this system reads exists here, so every parameter fails
+        // validation. Init is what is under test, and it runs first.
+        app.set_error_handler(bevy::ecs::error::ignore)
+            .add_systems(Update, drag_band);
+        app.world_mut().run_schedule(Update);
+    }
+
+    #[test]
+    fn only_a_band_worth_drawing_becomes_a_node() {
+        assert!(big_enough(Rect::from_corners(
+            Vec2::ZERO,
+            Vec2::splat(MIN_SIZE)
+        )));
+        // A slipped click, and a sliver too thin to hold text.
+        assert!(!big_enough(Rect::from_corners(
+            Vec2::ZERO,
+            Vec2::splat(2.0)
+        )));
+        assert!(!big_enough(Rect::from_corners(
+            Vec2::ZERO,
+            Vec2::new(400.0, 5.0)
+        )));
     }
 
     #[test]
