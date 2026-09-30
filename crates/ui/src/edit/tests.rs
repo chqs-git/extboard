@@ -194,3 +194,78 @@ fn deleting_a_node_takes_its_edges_with_it() {
     assert_eq!(canvas.nodes.len(), 1);
     assert!(canvas.edges.is_empty());
 }
+
+const NODE: Rect = Rect {
+    min: Vec2::new(0.0, 0.0),
+    max: Vec2::new(200.0, 100.0),
+};
+
+#[test]
+fn an_anchor_sits_on_the_middle_of_its_side() {
+    // World +y is up, so canvas Top is the rect's high edge.
+    assert_eq!(anchor(NODE, Side::Top), Vec2::new(100.0, 100.0));
+    assert_eq!(anchor(NODE, Side::Bottom), Vec2::new(100.0, 0.0));
+    assert_eq!(anchor(NODE, Side::Left), Vec2::new(0.0, 50.0));
+    assert_eq!(anchor(NODE, Side::Right), Vec2::new(200.0, 50.0));
+}
+
+#[test]
+fn the_live_anchor_is_the_nearest_one_within_reach() {
+    let far = Rect::from_corners(Vec2::new(600.0, 0.0), Vec2::new(800.0, 100.0));
+    let a = Entity::from_raw_u32(1).unwrap();
+    let b = Entity::from_raw_u32(2).unwrap();
+    let nodes = || [(a, NODE), (b, far)].into_iter();
+
+    // Outside the node entirely, but still within reach of its right anchor.
+    let got = nearest_anchor(nodes(), Vec2::new(220.0, 52.0), 28.0);
+    assert_eq!(
+        got.map(|(entity, side, _)| (entity, side)),
+        Some((a, Side::Right))
+    );
+
+    // The middle of a wide node is out of reach of all four.
+    assert_eq!(nearest_anchor(nodes(), NODE.center(), 28.0), None);
+
+    // Between the two, the nearer anchor wins.
+    let got = nearest_anchor(nodes(), Vec2::new(580.0, 50.0), 28.0);
+    assert_eq!(
+        got.map(|(entity, side, _)| (entity, side)),
+        Some((b, Side::Left))
+    );
+}
+
+#[test]
+fn a_drop_by_a_corner_lands_on_the_edge_it_is_closest_to() {
+    // Two units in from the right, ten down from the top: the right edge wins.
+    assert_eq!(nearest_side(NODE, Vec2::new(198.0, 90.0)), Side::Right);
+    assert_eq!(nearest_side(NODE, Vec2::new(190.0, 98.0)), Side::Top);
+    assert_eq!(nearest_side(NODE, Vec2::new(4.0, 50.0)), Side::Left);
+    assert_eq!(nearest_side(NODE, Vec2::new(100.0, 3.0)), Side::Bottom);
+}
+
+#[test]
+fn an_edge_records_both_sides_and_never_joins_a_node_to_itself() {
+    let mut canvas = canvas();
+    let other = created(&mut canvas, 1, Rect::from_center_size(Vec2::ZERO, NEW_SIZE));
+
+    assert!(!connected(
+        &mut canvas,
+        2,
+        ("n", Side::Right),
+        ("n", Side::Left)
+    ));
+    assert!(canvas.edges.is_empty());
+
+    assert!(connected(
+        &mut canvas,
+        2,
+        ("n", Side::Right),
+        (&other, Side::Left)
+    ));
+    let edge = &canvas.edges[0];
+    assert_eq!(
+        (edge.from_side, edge.to_side),
+        (Some(Side::Right), Some(Side::Left))
+    );
+    assert_eq!((&edge.from_node, &edge.to_node), (&"n".to_owned(), &other));
+}

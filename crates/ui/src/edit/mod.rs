@@ -1,7 +1,7 @@
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 use bevy::window::{CursorIcon, SystemCursorIcon};
-use extboard_core::{Canvas, Node as CanvasNode, NodeKind, fresh_id};
+use extboard_core::{Canvas, Edge as CanvasEdge, Node as CanvasNode, NodeKind, Side, fresh_id};
 
 use crate::client::Document;
 use crate::node::{NodeId, NodeRect, to_canvas};
@@ -15,6 +15,15 @@ const DOUBLE_SECS: f32 = 0.4;
 const DOUBLE_PX: f32 = 6.0;
 // Screen pixels, so the grip is the same target at every zoom.
 const GRIP_PX: f32 = 12.0;
+// The side anchor an edge starts from, in screen pixels so it is the same
+// target at every zoom.
+const ANCHOR_PX: f32 = 5.0;
+const ANCHOR: Color = Color::WHITE;
+// How near the cursor has to be for an anchor to show. Wider once an edge is
+// being drawn, so the far end is easy to land on.
+const REACH_PX: f32 = 28.0;
+const REACH_HOVER: f32 = 2.0;
+const REACH_DRAG: f32 = 8.0;
 
 pub struct EditPlugin;
 
@@ -29,6 +38,10 @@ enum Drag {
         handle: IVec2,
         start: Rect,
     },
+    Edge {
+        from: Entity,
+        side: Side,
+    },
 }
 
 impl Plugin for EditPlugin {
@@ -38,6 +51,8 @@ impl Plugin for EditPlugin {
             (
                 grab,
                 apply.run_if(resource_exists::<Document>),
+                anchors,
+                connect.run_if(resource_exists::<Document>),
                 release,
                 (create, delete).run_if(resource_exists::<Document>),
                 cursor,
@@ -66,6 +81,13 @@ fn grab(
     let Projection::Orthographic(ortho) = projection else {
         return;
     };
+
+    // Before the resize band: an anchor sits on a side, and drawing an edge from
+    // it has to beat dragging that side.
+    if let Some((from, side, _)) = anchor_under(rects(&nodes), projection, world, false) {
+        commands.insert_resource(Drag::Edge { from, side });
+        return;
+    }
 
     if let Ok(entity) = selected.single()
         && let Ok((_, transform, rect)) = nodes.get(entity)
@@ -142,6 +164,8 @@ fn apply(
                 sized(canvas, &id.0, resized(*start, *handle, world, MIN_SIZE));
             }
         }
+        // Nothing to write until the drop lands on a node.
+        Drag::Edge { .. } => {}
     }
 }
 
@@ -255,6 +279,168 @@ pub fn created(canvas: &mut Canvas, seed: u32, rect: Rect) -> String {
     id
 }
 
+// The one anchor within reach shows where an edge can start; a live drag shows
+// where it would land.
+fn anchors(
+    mut gizmos: Gizmos,
+    drag: Option<Res<Drag>>,
+    window: Single<&Window>,
+    camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
+    nodes: Query<(Entity, &Transform, &NodeRect)>,
+) {
+    let (camera, cam_global, projection) = *camera;
+    let (Some(world), Projection::Orthographic(ortho)) =
+        (cursor_world(&window, (camera, cam_global)), projection)
+    else {
+        return;
+    };
+    // A move or resize is already under way; anchors would only be clutter.
+    let drawing = matches!(drag.as_deref(), Some(Drag::Edge { .. }));
+    if drag.is_some() && !drawing {
+        return;
+    }
+    if let Some(Drag::Edge { from, side }) = drag.as_deref()
+        && let Ok((_, transform, rect)) = nodes.get(*from)
+    {
+        gizmos.line_2d(anchor(bounds(transform, rect), *side), world, ANCHOR);
+    }
+
+    if let Some((_, _, at)) = anchor_under(rects(&nodes), projection, world, drawing) {
+        gizmos.circle_2d(at, ANCHOR_PX * ortho.scale, ANCHOR);
+    }
+}
+
+pub fn rects<'a>(
+    nodes: &'a Query<(Entity, &Transform, &NodeRect)>,
+) -> impl Iterator<Item = (Entity, Rect)> + 'a {
+    nodes
+        .iter()
+        .map(|(entity, transform, rect)| (entity, bounds(transform, rect)))
+}
+
+pub fn anchor_under(
+    nodes: impl Iterator<Item = (Entity, Rect)>,
+    projection: &Projection,
+    point: Vec2,
+    drawing: bool,
+) -> Option<(Entity, Side, Vec2)> {
+    let Projection::Orthographic(ortho) = projection else {
+        return None;
+    };
+    let reach = if drawing { REACH_DRAG } else { REACH_HOVER };
+    nearest_anchor(nodes, point, REACH_PX * reach * ortho.scale)
+}
+
+fn nearest_anchor(
+    nodes: impl Iterator<Item = (Entity, Rect)>,
+    point: Vec2,
+    reach: f32,
+) -> Option<(Entity, Side, Vec2)> {
+    nodes
+        .flat_map(|(entity, rect)| SIDES.map(|side| (entity, side, anchor(rect, side))))
+        .filter(|(_, _, at)| at.distance(point) <= reach)
+        .min_by(|a, b| a.2.distance(point).total_cmp(&b.2.distance(point)))
+}
+
+// Landing on a node makes the edge; anywhere else drops it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
+fn connect(
+    buttons: Res<ButtonInput<MouseButton>>,
+    frames: Res<FrameCount>,
+    drag: Option<Res<Drag>>,
+    window: Single<&Window>,
+    camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
+    nodes: Query<(Entity, &Transform, &NodeRect)>,
+    ids: Query<&NodeId>,
+    mut document: ResMut<Document>,
+) {
+    let (camera, cam_global, projection) = *camera;
+    let Some(Drag::Edge { from, side }) = drag.as_deref() else {
+        return;
+    };
+    if buttons.pressed(MouseButton::Left) {
+        return;
+    }
+    let Some(world) = cursor_world(&window, (camera, cam_global)) else {
+        return;
+    };
+    // Inside a node, or on the anchor that is showing just off one of its sides.
+    let Some((target, to_side)) = pick(
+        nodes.iter().map(|(entity, transform, rect)| {
+            (entity, bounds(transform, rect), transform.translation.z)
+        }),
+        world,
+    )
+    .and_then(|entity| {
+        let (_, transform, rect) = nodes.get(entity).ok()?;
+        Some((entity, nearest_side(bounds(transform, rect), world)))
+    })
+    .or_else(|| {
+        anchor_under(rects(&nodes), projection, world, true).map(|(entity, side, _)| (entity, side))
+    }) else {
+        return;
+    };
+    let (Ok(start), Ok(end)) = (ids.get(*from), ids.get(target)) else {
+        return;
+    };
+    connected(
+        &mut document.0,
+        frames.0,
+        (&start.0, *side),
+        (&end.0, to_side),
+    );
+}
+
+const SIDES: [Side; 4] = [Side::Top, Side::Bottom, Side::Left, Side::Right];
+
+// World space, so canvas Top is the rect's high y.
+fn anchor(rect: Rect, side: Side) -> Vec2 {
+    let center = rect.center();
+    match side {
+        Side::Top => Vec2::new(center.x, rect.max.y),
+        Side::Bottom => Vec2::new(center.x, rect.min.y),
+        Side::Left => Vec2::new(rect.min.x, center.y),
+        Side::Right => Vec2::new(rect.max.x, center.y),
+    }
+}
+
+// The side the drop is nearest, measured straight out to each edge rather than
+// to its midpoint: a drop by a corner belongs to the edge it is closest to.
+fn nearest_side(rect: Rect, point: Vec2) -> Side {
+    [
+        (Side::Left, point.x - rect.min.x),
+        (Side::Right, rect.max.x - point.x),
+        (Side::Bottom, point.y - rect.min.y),
+        (Side::Top, rect.max.y - point.y),
+    ]
+    .into_iter()
+    .min_by(|a, b| a.1.total_cmp(&b.1))
+    .map(|(side, _)| side)
+    .expect("four sides")
+}
+
+// `false` when the edge was refused: a node joined to itself is not a link.
+fn connected(canvas: &mut Canvas, seed: u32, from: (&str, Side), to: (&str, Side)) -> bool {
+    if from.0 == to.0 {
+        return false;
+    }
+    let edge = CanvasEdge {
+        id: fresh_id(canvas, &seed.to_le_bytes()),
+        from_node: from.0.to_owned(),
+        from_side: Some(from.1),
+        from_end: None,
+        to_node: to.0.to_owned(),
+        to_side: Some(to.1),
+        to_end: None,
+        label: None,
+        extra: default(),
+    };
+    canvas.add_edge(edge).is_ok()
+}
+
 fn release(
     mut commands: Commands,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -279,6 +465,7 @@ fn cursor(
     let want = match drag.as_deref() {
         Some(Drag::Resize { handle, .. }) => resize_cursor(*handle),
         Some(Drag::Move { .. }) => SystemCursorIcon::Grabbing,
+        Some(Drag::Edge { .. }) => SystemCursorIcon::Crosshair,
         None => hovered_handle(window, (camera, cam_global), projection, &nodes, &selected)
             .map_or(SystemCursorIcon::Default, resize_cursor),
     };
