@@ -121,3 +121,76 @@ fn each_handle_points_the_way_its_edge_moves() {
     assert!(matches!(resize_cursor(IVec2::new(1, 1)), NeswResize));
     assert!(matches!(resize_cursor(IVec2::new(-1, -1)), NeswResize));
 }
+
+#[test]
+fn a_third_press_does_not_ride_the_second_ones_pair() {
+    let mut last = None;
+    assert!(!double_click(&mut last, 0.0, Vec2::ZERO));
+    assert!(double_click(&mut last, 0.1, Vec2::new(2.0, 0.0)));
+    assert!(!double_click(&mut last, 0.2, Vec2::ZERO));
+}
+
+#[test]
+fn a_slow_or_distant_second_press_is_two_clicks() {
+    let mut last = None;
+    double_click(&mut last, 0.0, Vec2::ZERO);
+    assert!(!double_click(&mut last, 1.0, Vec2::ZERO));
+
+    let mut last = None;
+    double_click(&mut last, 0.0, Vec2::ZERO);
+    assert!(!double_click(&mut last, 0.1, Vec2::new(40.0, 0.0)));
+}
+
+#[test]
+fn a_new_node_is_centred_on_the_cursor_and_keeps_its_own_id() {
+    let mut canvas = canvas();
+    let id = created(
+        &mut canvas,
+        7,
+        Rect::from_center_size(Vec2::new(200.0, -90.0), NEW_SIZE),
+    );
+    assert_ne!(id, "n");
+    let node = canvas.nodes.iter().find(|n| n.id == id).unwrap();
+    let half = NEW_SIZE / 2.0;
+    assert_eq!(
+        (node.width, node.height),
+        (NEW_SIZE.x as i64, NEW_SIZE.y as i64)
+    );
+    // Canvas +y is down: the top-left is above and left of the world centre.
+    assert_eq!((node.x, node.y), (200 - half.x as i64, 90 - half.y as i64));
+    assert!(matches!(&node.kind, NodeKind::Text { text } if text.is_empty()));
+}
+
+#[test]
+fn a_band_drawn_node_is_exactly_the_band() {
+    let mut canvas = canvas();
+    let rect = Rect::from_corners(Vec2::new(-20.0, -300.0), Vec2::new(130.0, -80.0));
+    let id = created(&mut canvas, 3, rect);
+    let node = canvas.nodes.iter().find(|n| n.id == id).unwrap();
+    assert_eq!((node.width, node.height), (150, 220));
+    // World top-left is (min.x, max.y); canvas y is that flipped.
+    assert_eq!((node.x, node.y), (-20, 80));
+}
+
+#[test]
+fn deleting_a_node_takes_its_edges_with_it() {
+    let mut canvas = canvas();
+    let other = created(&mut canvas, 1, Rect::from_center_size(Vec2::ZERO, NEW_SIZE));
+    canvas
+        .add_edge(extboard_core::Edge {
+            id: "e".to_owned(),
+            from_node: "n".to_owned(),
+            from_side: None,
+            from_end: None,
+            to_node: other,
+            to_side: None,
+            to_end: None,
+            label: None,
+            extra: Default::default(),
+        })
+        .unwrap();
+
+    canvas.remove_node("n").unwrap();
+    assert_eq!(canvas.nodes.len(), 1);
+    assert!(canvas.edges.is_empty());
+}

@@ -1,12 +1,18 @@
+use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 use bevy::window::{CursorIcon, SystemCursorIcon};
-use extboard_core::{Canvas, Node as CanvasNode};
+use extboard_core::{Canvas, Node as CanvasNode, NodeKind, fresh_id};
 
 use crate::client::Document;
 use crate::node::{NodeId, NodeRect, to_canvas};
 use crate::select::{Selected, bounds, cursor_world, pick};
 
-const MIN_SIZE: f32 = 40.0;
+pub const MIN_SIZE: f32 = 40.0;
+const NEW_SIZE: Vec2 = Vec2::new(120.0, 120.0);
+// Two presses inside both of these are one double-click. Screen pixels, so the
+// slop is the hand's, not the zoom's.
+const DOUBLE_SECS: f32 = 0.4;
+const DOUBLE_PX: f32 = 6.0;
 // Screen pixels, so the grip is the same target at every zoom.
 const GRIP_PX: f32 = 12.0;
 
@@ -33,6 +39,7 @@ impl Plugin for EditPlugin {
                 grab,
                 apply.run_if(resource_exists::<Document>),
                 release,
+                (create, delete).run_if(resource_exists::<Document>),
                 cursor,
             )
                 .chain(),
@@ -158,6 +165,94 @@ fn sized(canvas: &mut Canvas, id: &str, rect: Rect) {
     let top_left = to_canvas(rect.center(), rect.size());
     (node.x, node.y) = (top_left.x.round() as i64, top_left.y.round() as i64);
     (node.width, node.height) = (rect.width().round() as i64, rect.height().round() as i64);
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
+fn create(
+    time: Res<Time>,
+    frames: Res<FrameCount>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    window: Single<&Window>,
+    camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    nodes: Query<(Entity, &Transform, &NodeRect)>,
+    mut document: ResMut<Document>,
+    mut last: Local<Option<(f32, Vec2)>>,
+) {
+    if !buttons.just_pressed(MouseButton::Left) || keys.pressed(KeyCode::Space) {
+        return;
+    }
+    let Some(screen) = window.cursor_position() else {
+        return;
+    };
+    if !double_click(&mut last, time.elapsed_secs(), screen) {
+        return;
+    }
+    let Some(world) = cursor_world(&window, *camera) else {
+        return;
+    };
+    // Empty canvas only: a double-click on a node is E5-T5's way into edit mode.
+    let occupied = pick(
+        nodes.iter().map(|(entity, transform, rect)| {
+            (entity, bounds(transform, rect), transform.translation.z)
+        }),
+        world,
+    );
+    if occupied.is_some() {
+        return;
+    }
+    created(
+        &mut document.0,
+        frames.0,
+        Rect::from_center_size(world, NEW_SIZE),
+    );
+}
+
+fn delete(
+    keys: Res<ButtonInput<KeyCode>>,
+    selected: Query<&NodeId, With<Selected>>,
+    mut document: ResMut<Document>,
+) {
+    // Mac's delete key is Backspace.
+    if selected.is_empty() || !keys.any_just_pressed([KeyCode::Delete, KeyCode::Backspace]) {
+        return;
+    }
+    let canvas = &mut document.0;
+    for id in &selected {
+        // Cascades the node's edges; a stale selection entity is not an error.
+        let _ = canvas.remove_node(&id.0);
+    }
+}
+
+fn double_click(last: &mut Option<(f32, Vec2)>, now: f32, at: Vec2) -> bool {
+    let again = last
+        .is_some_and(|(then, there)| now - then <= DOUBLE_SECS && there.distance(at) <= DOUBLE_PX);
+    // The pair is spent, so a third press opens a new one instead of firing again.
+    *last = (!again).then_some((now, at));
+    again
+}
+
+pub fn created(canvas: &mut Canvas, seed: u32, rect: Rect) -> String {
+    let top_left = to_canvas(rect.center(), rect.size());
+    let id = fresh_id(canvas, &seed.to_le_bytes());
+    canvas
+        .add_node(CanvasNode {
+            id: id.clone(),
+            x: top_left.x.round() as i64,
+            y: top_left.y.round() as i64,
+            width: rect.width().round() as i64,
+            height: rect.height().round() as i64,
+            color: None,
+            kind: NodeKind::Text {
+                text: String::new(),
+            },
+            extra: default(),
+        })
+        .expect("fresh_id never collides");
+    id
 }
 
 fn release(
