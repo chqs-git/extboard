@@ -43,6 +43,12 @@ bevy = { version = "0.19", default-features = false, features = [
   "bevy_ui",
   "bevy_ui_render",
   "system_clipboard",
+  # E5-T5 edits text with bevy_ui_widgets' EditableText, which DefaultPlugins
+  # wires up (input focus included). Picking is how a click lands the caret and
+  # a drag selects: without it the editor is keyboard-only.
+  "bevy_ui_widgets",
+  "bevy_picking",
+  "ui_picking",
   # linux: add "x11", "wayland" — no window without them
 ] }
 

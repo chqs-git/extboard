@@ -46,15 +46,23 @@ enum Drag {
 
 impl Plugin for EditPlugin {
     fn build(&self, app: &mut App) {
+        // An edit session owns the keyboard and the pointer: backspace deletes a
+        // character, not the node. Only `release` and `cursor` stay, so a drag
+        // that was under way when it began still gets cleaned up.
         app.add_systems(
             Update,
             (
-                grab,
-                apply.run_if(resource_exists::<Document>),
-                anchors,
-                connect.run_if(resource_exists::<Document>),
+                (
+                    grab,
+                    apply.run_if(resource_exists::<Document>),
+                    anchors,
+                    connect.run_if(resource_exists::<Document>),
+                )
+                    .chain()
+                    .run_if(not(crate::text::editing)),
                 release,
-                (create, delete).run_if(resource_exists::<Document>),
+                (create, delete)
+                    .run_if(resource_exists::<Document>.and_then(not(crate::text::editing))),
                 cursor,
             )
                 .chain(),
@@ -204,6 +212,7 @@ fn create(
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     nodes: Query<(Entity, &Transform, &NodeRect)>,
     mut document: ResMut<Document>,
+    mut editing: ResMut<crate::text::Editing>,
     mut last: Local<Option<(f32, Vec2)>>,
 ) {
     if !buttons.just_pressed(MouseButton::Left) || keys.pressed(KeyCode::Space) {
@@ -228,11 +237,14 @@ fn create(
     if occupied.is_some() {
         return;
     }
-    created(
+    let id = created(
         &mut document.0,
         frames.0,
         Rect::from_center_size(world, NEW_SIZE),
     );
+    // A node made by double-clicking opens for typing, so the gesture is one
+    // move: double-click, type.
+    editing.0 = Some(id);
 }
 
 fn delete(
@@ -251,7 +263,7 @@ fn delete(
     }
 }
 
-fn double_click(last: &mut Option<(f32, Vec2)>, now: f32, at: Vec2) -> bool {
+pub fn double_click(last: &mut Option<(f32, Vec2)>, now: f32, at: Vec2) -> bool {
     let again = last
         .is_some_and(|(then, there)| now - then <= DOUBLE_SECS && there.distance(at) <= DOUBLE_PX);
     // The pair is spent, so a third press opens a new one instead of firing again.

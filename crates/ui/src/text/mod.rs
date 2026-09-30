@@ -1,4 +1,5 @@
 use bevy::camera::CameraUpdateSystems;
+use bevy::input::InputSystems;
 use bevy::prelude::*;
 use bevy::text::{FontStyle, FontWeight};
 use bevy::transform::TransformSystems;
@@ -10,6 +11,11 @@ use std::collections::HashMap;
 use crate::camera::world_to_screen;
 use crate::client::Document;
 use crate::node::{NodeId, NodeRect};
+
+mod edit_text;
+
+pub use edit_text::{Editing, editing};
+use edit_text::{editor, toggle};
 
 // global mk settings
 const PADDING: f32 = 12.0;
@@ -38,19 +44,34 @@ struct Content(String);
 
 impl Plugin for TextPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            spawn_panels.run_if(resource_exists_and_changed::<Document>),
-        )
-        // After propagation and CameraUpdateSystems, or the camera transform and
-        // projection this reads are a frame stale. Before Layout: it writes `Node`.
-        .add_systems(
-            PostUpdate,
-            track_panels
-                .after(TransformSystems::Propagate)
-                .after(CameraUpdateSystems)
-                .before(UiSystems::Layout),
-        );
+        app.init_resource::<Editing>()
+            // Before every Update system that reads the same click, so a frame
+            // is either an editing frame or a canvas one, never half of each.
+            .add_systems(
+                PreUpdate,
+                toggle
+                    .after(InputSystems)
+                    .run_if(resource_exists::<Document>),
+            )
+            .add_systems(
+                Update,
+                // `and_then` is lazy, so the changed checks never run before the
+                // document lands: entering edit mode has to rebuild a panel too.
+                spawn_panels.run_if(
+                    resource_exists::<Document>.and_then(
+                        resource_changed::<Document>.or_else(resource_changed::<Editing>),
+                    ),
+                ),
+            )
+            // After propagation and CameraUpdateSystems, or the camera transform and
+            // projection this reads are a frame stale. Before Layout: it writes `Node`.
+            .add_systems(
+                PostUpdate,
+                track_panels
+                    .after(TransformSystems::Propagate)
+                    .after(CameraUpdateSystems)
+                    .before(UiSystems::Layout),
+            );
     }
 }
 
@@ -64,6 +85,7 @@ fn markdown(node: &CanvasNode) -> Option<&str> {
 fn spawn_panels(
     mut commands: Commands,
     document: Res<Document>,
+    editing: Res<Editing>,
     existing: Query<Entity, With<ClipBox>>,
 ) {
     // rebuilds every panel
@@ -76,7 +98,7 @@ fn spawn_panels(
             continue;
         };
         let size = Vec2::new(node.width as f32, node.height as f32);
-        let blocks = blocks(md);
+        let open = editing.0.as_deref() == Some(node.id.as_str());
         commands
             .spawn((
                 ClipBox(node.id.clone()),
@@ -105,11 +127,16 @@ fn spawn_panels(
                             ..default()
                         },
                     ))
-                    .with_children(|parent| spawn_blocks(&blocks, parent));
+                    .with_children(|parent| {
+                        if open {
+                            parent.spawn(editor(md));
+                        } else {
+                            spawn_blocks(&blocks(md), parent);
+                        }
+                    });
             });
     }
 }
-
 fn track_panels(
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(&NodeId, &Transform, &NodeRect)>,
@@ -418,113 +445,4 @@ fn color(span: &Span) -> Color {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // The scaled content's corner, relative to the clip box's. Non-zero clips.
-    fn content_top_left(size: Vec2, zoom: f32) -> Vec2 {
-        let center = size / 2.0 + centre_scale_offset(size, zoom);
-        center - size * zoom / 2.0
-    }
-
-    #[test]
-    fn content_fills_its_clip_box_at_every_zoom() {
-        let size = Vec2::new(740.0, 460.0);
-        for zoom in [0.25, 0.5, 1.0, 2.0, 8.0] {
-            let corner = content_top_left(size, zoom);
-            assert!(corner.abs().max_element() < 1e-3, "zoom {zoom}: {corner}");
-        }
-    }
-
-    fn line(blocks: &[Block], index: usize) -> &[Span] {
-        match &blocks[index] {
-            Block::Line(spans) => spans,
-            other => panic!("block {index} is {other:?}, not a line"),
-        }
-    }
-
-    #[test]
-    fn inline_runs_keep_their_marks() {
-        let got = blocks("plain *em* **strong** `code()` [link](https://bevy.org)");
-        let spans = line(&got, 0);
-        let marks: Vec<_> = spans
-            .iter()
-            .map(|s| (s.text.as_str(), s.bold, s.italic, s.mono, s.link))
-            .collect();
-        assert_eq!(
-            marks,
-            [
-                ("plain ", false, false, false, false),
-                ("em", false, true, false, false),
-                (" ", false, false, false, false),
-                ("strong", true, false, false, false),
-                (" ", false, false, false, false),
-                ("code()", false, false, true, false),
-                (" ", false, false, false, false),
-                ("link", false, false, false, true),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_heading_is_bold_and_bigger_than_the_body() {
-        let got = blocks("# Title\n\nbody\n");
-        let title = &line(&got, 0)[0];
-        assert!(title.bold && title.size > BODY, "{title:?}");
-        assert_eq!(line(&got, 1)[0].size, BODY);
-    }
-
-    #[test]
-    fn nested_emphasis_closes_inside_out() {
-        let got = blocks("**bold *both* tail**");
-        let spans = line(&got, 0);
-        assert!(spans.iter().all(|s| s.bold), "{spans:?}");
-        assert_eq!(
-            spans
-                .iter()
-                .filter(|s| s.italic)
-                .map(|s| &s.text)
-                .collect::<Vec<_>>(),
-            ["both"]
-        );
-    }
-
-    #[test]
-    fn a_table_becomes_a_grid_of_cells_in_row_order() {
-        let got =
-            blocks("| crate | verdict |\n|---|---|\n| bevy | parley |\n| pulldown | tables |\n");
-        let Block::Table { cols, cells } = &got[0] else {
-            panic!("{got:?}");
-        };
-        assert_eq!(*cols, 2);
-        assert_eq!(cells.len(), 6, "2 columns x 3 rows");
-        assert_eq!(
-            cells
-                .iter()
-                .map(|c| (c.text.as_str(), c.head))
-                .collect::<Vec<_>>(),
-            [
-                ("crate", true),
-                ("verdict", true),
-                ("bevy", false),
-                ("parley", false),
-                ("pulldown", false),
-                ("tables", false),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_code_block_keeps_its_newlines_and_drops_the_trailing_one() {
-        let got = blocks("```rust\nfn main() {\n    ok();\n}\n```\n");
-        assert_eq!(got, [Block::Code("fn main() {\n    ok();\n}".to_owned())]);
-    }
-
-    #[test]
-    fn list_items_are_one_line_each_with_a_bullet() {
-        let got = blocks("- first\n- second **bold**\n");
-        assert_eq!(got.len(), 2);
-        assert_eq!(line(&got, 0)[0].text, "- ");
-        assert_eq!(line(&got, 1).last().unwrap().text, "bold");
-    }
-}
+mod tests;

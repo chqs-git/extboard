@@ -41,7 +41,18 @@ struct Band {
 impl Plugin for SelectPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_fill)
-            .add_systems(Update, (press, drag_band, release, outline).chain());
+            // `press` only: a click that ends an edit session is spent on that,
+            // and no band can exist while one is open.
+            .add_systems(
+                Update,
+                (
+                    press.run_if(not(crate::text::editing)),
+                    drag_band,
+                    release,
+                    outline,
+                )
+                    .chain(),
+            );
     }
 }
 
