@@ -153,6 +153,8 @@ fn show_notice(
     };
     commands.spawn((
         ErrorText,
+        // Node panels are UI too and respawn on every change.
+        GlobalZIndex(1),
         Text::new(message.clone()),
         TextFont::from_font_size(14.0),
         TextColor(Color::srgb(0.9, 0.35, 0.35)),

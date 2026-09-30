@@ -56,7 +56,7 @@ fn canvas() -> Canvas {
 fn a_move_writes_the_canvas_top_left_with_y_flipped() {
     let mut canvas = canvas();
     let center = Vec2::new(200.0, -90.0) + Vec2::new(30.0, 25.0);
-    moved(&mut canvas, "n", center);
+    moved(&mut canvas, "n", center, 1.0);
     let node = &canvas.nodes[0];
     assert_eq!((node.x, node.y), (130, 15));
     assert_eq!((node.width, node.height), (200, 100));
@@ -70,6 +70,7 @@ fn a_resize_from_the_top_left_leaves_the_bottom_right_alone() {
         &mut canvas,
         "n",
         resized(start, IVec2::new(-1, 1), Vec2::new(60.0, -20.0), MIN_SIZE),
+        1.0,
     );
     let node = &canvas.nodes[0];
     assert_eq!((node.x, node.y), (60, 20));
@@ -366,4 +367,62 @@ fn a_redirect_onto_the_other_end_is_refused_and_an_unknown_edge_is_not_a_panic()
         Tip::To,
         (&other, Side::Top)
     ));
+}
+
+#[test]
+fn a_group_carries_what_sits_wholly_inside_it() {
+    let group = (Entity::from_raw_u32(1).unwrap(), NODE);
+    let inside = (
+        Entity::from_raw_u32(2).unwrap(),
+        Rect::from_corners(Vec2::new(20.0, 20.0), Vec2::new(80.0, 80.0)),
+    );
+    // Over the border, so it belongs to what is outside the group.
+    let straddling = (
+        Entity::from_raw_u32(3).unwrap(),
+        Rect::from_corners(Vec2::new(180.0, 20.0), Vec2::new(260.0, 80.0)),
+    );
+    let outside = (
+        Entity::from_raw_u32(4).unwrap(),
+        Rect::from_corners(Vec2::new(400.0, 0.0), Vec2::new(500.0, 100.0)),
+    );
+
+    let got = contained([group, inside, straddling, outside].into_iter(), group);
+    assert_eq!(got, [inside.0]);
+}
+
+#[test]
+fn a_snap_lands_on_the_grid_and_a_grid_of_one_only_rounds() {
+    assert_eq!(
+        snapped(Vec2::new(103.0, -47.0), GRID),
+        Vec2::new(100.0, -50.0)
+    );
+    assert_eq!(snapped(Vec2::new(105.0, 0.0), GRID), Vec2::new(110.0, 0.0));
+    // What the document needs regardless: it holds integers.
+    assert_eq!(
+        snapped(Vec2::new(103.4, -47.6), 1.0),
+        Vec2::new(103.0, -48.0)
+    );
+}
+
+#[test]
+fn a_snapped_drag_puts_both_corners_on_the_grid() {
+    let mut canvas = canvas();
+    let start = Rect::from_center_size(Vec2::new(203.0, -87.0), Vec2::new(204.0, 96.0));
+    sized(&mut canvas, "n", start, GRID);
+    let node = &canvas.nodes[0];
+    for edge in [node.x, node.y, node.x + node.width, node.y + node.height] {
+        assert_eq!(edge % GRID as i64, 0, "{edge} is off the grid");
+    }
+}
+
+#[test]
+fn a_locked_move_keeps_only_the_axis_it_went_furthest_along() {
+    let mostly_across = Vec2::new(90.0, 12.0);
+    assert_eq!(travel(mostly_across, true), Vec2::new(90.0, 0.0));
+    assert_eq!(travel(mostly_across, false), mostly_across);
+
+    let mostly_up = Vec2::new(-8.0, 60.0);
+    assert_eq!(travel(mostly_up, true), Vec2::new(0.0, 60.0));
+    // A diagonal of exactly equal parts has to pick one, and does not wobble.
+    assert_eq!(travel(Vec2::splat(20.0), true), Vec2::new(20.0, 0.0));
 }

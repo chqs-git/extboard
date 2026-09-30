@@ -1,13 +1,14 @@
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 
-use crate::camera::screen_to_world;
+use crate::camera::{screen_to_world, world_to_screen};
 use crate::client::Document;
 use crate::edit::{MIN_SIZE, Reach, TIP_PX, anchor_under, created, rects, tip_under};
 use crate::node::NodeRect;
 use crate::scene::{EdgeId, nearest};
 
-// scene.rs paints a selected edge with it.
+// A selected edge is painted with it in scene.rs, and a selected node's panel
+// outlined with it in text/panel.rs.
 pub const OUTLINE: Color = Color::srgb(0.95, 0.75, 0.30);
 // How near the cursor has to be to hit an edge, in screen pixels. text.rs asks
 // the same question when a double-click opens a label.
@@ -19,19 +20,20 @@ const BAND_CREATE: Color = Color::WHITE;
 // The knob: over empty canvas there is nothing behind the wash, so the alpha is
 // only how light the block reads. Sweep it over a node to see it blend.
 const BAND_FILL: Color = Color::srgba(0.55, 0.65, 0.80, 0.1);
-// Above the node rects and the edge labels: it is an overlay on all of them.
-const BAND_Z: f32 = 2.0;
+// Above the node panels, which order themselves from 0 up.
+const BAND_Z: i32 = 1_000;
+const BAND_BORDER_PX: f32 = 1.0;
 
 pub struct SelectPlugin;
 
 #[derive(Component)]
 pub struct Selected;
 
-// Gizmos draw lines, not fills, so the wash is one quad, the same unit mesh
-// node.rs scales. It lives for the whole run and hides itself: spawning per
-// gesture would lag a frame behind.
+// UI, like the node panels, and above them: a gizmo band would be drawn in the
+// world, which is under every panel it is sweeping over. It lives for the whole
+// run and hides itself, since spawning per gesture would lag a frame behind.
 #[derive(Component)]
-struct BandFill;
+struct BandBox;
 
 #[derive(Resource)]
 struct Band {
@@ -50,28 +52,22 @@ impl Plugin for SelectPlugin {
             // and no band can exist while one is open.
             .add_systems(
                 Update,
-                (
-                    press.run_if(not(crate::text::editing)),
-                    drag_band,
-                    release,
-                    outline,
-                )
-                    .chain(),
+                (press.run_if(not(crate::text::editing)), drag_band, release).chain(),
             );
     }
 }
 
-fn spawn_fill(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
+fn spawn_fill(mut commands: Commands) {
     commands.spawn((
-        BandFill,
-        Mesh2d(meshes.add(Rectangle::from_length(1.0))),
-        // ColorMaterial reads the alpha and blends; a Sprite draws it opaque.
-        MeshMaterial2d(materials.add(BAND_FILL)),
-        Transform::from_xyz(0.0, 0.0, BAND_Z),
+        BandBox,
+        Node {
+            position_type: PositionType::Absolute,
+            border: UiRect::all(px(BAND_BORDER_PX)),
+            ..default()
+        },
+        BorderColor::all(BAND),
+        BackgroundColor(Color::NONE),
+        GlobalZIndex(BAND_Z),
         Visibility::Hidden,
     ));
 }
@@ -160,20 +156,25 @@ fn press(
 )]
 fn drag_band(
     mut commands: Commands,
-    mut gizmos: Gizmos,
     keys: Res<ButtonInput<KeyCode>>,
     band: Option<ResMut<Band>>,
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     nodes: Query<(Entity, &Transform, &NodeRect)>,
     selected: Query<Entity, With<Selected>>,
-    // Without<NodeRect>: `nodes` wants a Transform too, and only one of the two
-    // may have it mutably.
-    fill: Single<(&mut Transform, &mut Visibility), (With<BandFill>, Without<NodeRect>)>,
+    box_: Single<
+        (
+            &mut Node,
+            &mut BorderColor,
+            &mut BackgroundColor,
+            &mut Visibility,
+        ),
+        With<BandBox>,
+    >,
 ) {
-    let (mut fill_transform, mut fill_visibility) = fill.into_inner();
+    let (mut node, mut border, mut background, mut visibility) = box_.into_inner();
     let Some(mut band) = band else {
-        fill_visibility.set_if_neq(Visibility::Hidden);
+        visibility.set_if_neq(Visibility::Hidden);
         return;
     };
     let Some(world) = cursor_world(&window, *camera) else {
@@ -181,20 +182,20 @@ fn drag_band(
     };
     let rect = Rect::from_corners(band.start, world);
     let creating = !band.additive && keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
-    gizmos.rect_2d(
-        Isometry2d::from_translation(rect.center()),
-        rect.size(),
-        if creating { BAND_CREATE } else { BAND },
-    );
-    if creating {
-        fill_transform.translation = rect.center().extend(BAND_Z);
-        fill_transform.scale = rect.size().extend(1.0);
+
+    // Screen space, from the two world corners: the band is the same overlay at
+    // every zoom, like the panels it is drawn over.
+    if let (Some(min), Some(max)) = (
+        world_to_screen(camera.0, camera.1, Vec2::new(rect.min.x, rect.max.y)),
+        world_to_screen(camera.0, camera.1, Vec2::new(rect.max.x, rect.min.y)),
+    ) {
+        (node.left, node.top, node.width, node.height) =
+            (px(min.x), px(min.y), px(max.x - min.x), px(max.y - min.y));
     }
-    fill_visibility.set_if_neq(if creating {
-        Visibility::Visible
-    } else {
-        Visibility::Hidden
-    });
+    *border = BorderColor::all(if creating { BAND_CREATE } else { BAND });
+    // Shift turns the sweep into a new node's footprint, and a wash is what says so.
+    background.0 = if creating { BAND_FILL } else { Color::NONE };
+    visibility.set_if_neq(Visibility::Visible);
 
     // Drawing a node, not sweeping one up: leave the selection where it was, so
     // letting shift go puts the sweep back exactly as it stood.
@@ -243,17 +244,6 @@ fn release(
 // A band this small is a slipped click, not a node someone drew.
 fn big_enough(rect: Rect) -> bool {
     rect.size().min_element() >= MIN_SIZE
-}
-
-fn outline(mut gizmos: Gizmos, selected: Query<(&Transform, &NodeRect), With<Selected>>) {
-    for (transform, node) in &selected {
-        let rect = bounds(transform, node);
-        gizmos.rect_2d(
-            Isometry2d::from_translation(rect.center()),
-            rect.size(),
-            OUTLINE,
-        );
-    }
 }
 
 fn picked(
@@ -328,10 +318,10 @@ mod tests {
         assert_eq!(pick([card].into_iter(), Vec2::new(150.0, 0.0)), None);
     }
 
-    // Both queries want a Transform and one wants it mutably; Bevy panics on
-    // that at system init, which is a running app, not a compile.
+    // The band box wants a `Node` mutably while the panels hold their own; Bevy
+    // panics on an overlap at system init, which is a running app, not a compile.
     #[test]
-    fn the_fill_and_the_node_queries_stay_disjoint() {
+    fn the_band_and_the_node_queries_stay_disjoint() {
         let mut app = App::new();
         // Nothing this system reads exists here, so every parameter fails
         // validation. Init is what is under test, and it runs first.
