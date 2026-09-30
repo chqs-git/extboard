@@ -1,4 +1,3 @@
-use crate::commands;
 use crate::events::{Events, events, watch};
 use crate::store::{Store, StoreError};
 use crate::view;
@@ -65,7 +64,6 @@ fn router(state: AppState, dir: PathBuf) -> Router {
         .route("/api/spaces", get(list_spaces))
         .route("/api/spaces/{id}", get(get_space))
         .route("/api/spaces/{id}", put(put_space))
-        .route("/api/commands", get(commands::list))
         .route("/api/events", get(events))
         .route("/v/{id}", get(view_space))
         .nest_service("/f", ServeDir::new(dir))
