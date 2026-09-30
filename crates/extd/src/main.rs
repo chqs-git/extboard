@@ -1,6 +1,5 @@
 mod api;
 mod cli;
-mod commands;
 mod events;
 mod project;
 mod store;
