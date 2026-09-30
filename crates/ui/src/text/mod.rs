@@ -14,8 +14,8 @@ use crate::node::{NodeId, NodeRect};
 
 mod edit_text;
 
-pub use edit_text::{Editing, editing};
-use edit_text::{editor, toggle};
+pub use edit_text::{Editing, Target, editing};
+use edit_text::{LabelBox, editor, label_editor, toggle, track_label};
 
 // global mk settings
 const PADDING: f32 = 12.0;
@@ -67,7 +67,7 @@ impl Plugin for TextPlugin {
             // projection this reads are a frame stale. Before Layout: it writes `Node`.
             .add_systems(
                 PostUpdate,
-                track_panels
+                (track_panels, track_label)
                     .after(TransformSystems::Propagate)
                     .after(CameraUpdateSystems)
                     .before(UiSystems::Layout),
@@ -86,11 +86,22 @@ fn spawn_panels(
     mut commands: Commands,
     document: Res<Document>,
     editing: Res<Editing>,
-    existing: Query<Entity, With<ClipBox>>,
+    existing: Query<Entity, Or<(With<ClipBox>, With<LabelBox>)>>,
 ) {
     // rebuilds every panel
     for entity in &existing {
         commands.entity(entity).despawn();
+    }
+
+    // Over the label it is replacing; track_label puts it on the right edge.
+    if let Some(id) = editing.edge() {
+        let label = document
+            .0
+            .edges
+            .iter()
+            .find(|edge| edge.id == id)
+            .and_then(|edge| edge.label.as_deref());
+        commands.spawn(label_editor(label.unwrap_or_default()));
     }
 
     for node in &document.0.nodes {
@@ -98,7 +109,7 @@ fn spawn_panels(
             continue;
         };
         let size = Vec2::new(node.width as f32, node.height as f32);
-        let open = editing.0.as_deref() == Some(node.id.as_str());
+        let open = editing.node() == Some(node.id.as_str());
         commands
             .spawn((
                 ClipBox(node.id.clone()),

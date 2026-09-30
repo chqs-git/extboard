@@ -3,10 +3,15 @@ use bevy::prelude::*;
 
 use crate::camera::screen_to_world;
 use crate::client::Document;
-use crate::edit::{MIN_SIZE, anchor_under, created, rects};
+use crate::edit::{MIN_SIZE, Reach, TIP_PX, anchor_under, created, rects, tip_under};
 use crate::node::NodeRect;
+use crate::scene::{EdgeId, nearest};
 
-const OUTLINE: Color = Color::srgb(0.95, 0.75, 0.30);
+// scene.rs paints a selected edge with it.
+pub const OUTLINE: Color = Color::srgb(0.95, 0.75, 0.30);
+// How near the cursor has to be to hit an edge, in screen pixels. text.rs asks
+// the same question when a double-click opens a label.
+pub const EDGE_PX: f32 = 8.0;
 const BAND: Color = Color::srgb(0.55, 0.65, 0.80);
 // Shift turns the sweep into the outline of a new node: a white edge over the
 // wash that shows the node's footprint.
@@ -71,6 +76,10 @@ fn spawn_fill(
     ));
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
 fn press(
     mut commands: Commands,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -78,6 +87,8 @@ fn press(
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(Entity, &Transform, &NodeRect)>,
+    edges: Query<(Entity, &EdgeId)>,
+    document: Option<Res<Document>>,
     selected: Query<Entity, With<Selected>>,
 ) {
     let (camera, cam_global, projection) = *camera;
@@ -88,8 +99,18 @@ fn press(
     let Some(world) = cursor_world(&window, (camera, cam_global)) else {
         return;
     };
-    // An anchor showing off a node's side is edit.rs's edge drag, not a sweep.
-    if anchor_under(rects(&nodes), projection, world, false).is_some() {
+    let Projection::Orthographic(ortho) = projection else {
+        return;
+    };
+    // A press on the anchor circle itself is edit.rs's edge drag, not a sweep.
+    if anchor_under(rects(&nodes), projection, world, Reach::Grip).is_some() {
+        return;
+    }
+    // Same for the arrowhead on the end of an edge: that press is a redirect.
+    if document
+        .as_deref()
+        .is_some_and(|document| tip_under(&document.0, world, TIP_PX * ortho.scale).is_some())
+    {
         return;
     }
     let add = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
@@ -100,15 +121,22 @@ fn press(
         }),
         world,
     ) {
-        match (add, selected.contains(entity)) {
-            (true, true) => commands.entity(entity).remove::<Selected>(),
-            (true, false) => commands.entity(entity).insert(Selected),
-            // Already selected: leave the rest of the selection alone, the
-            // press is the start of dragging all of it.
-            (false, true) => return,
-            (false, false) => return replace(&mut commands, &selected, &[entity]),
-        };
-        return;
+        return picked(&mut commands, &selected, add, entity);
+    }
+
+    // An edge is a thin target, so it is tried where no node was hit. A press on
+    // one is not a drag, and never starts a band.
+    if let Some(entity) = document
+        .as_deref()
+        .and_then(|document| nearest(&document.0, world, EDGE_PX * ortho.scale))
+        .and_then(|id| {
+            edges
+                .iter()
+                .find(|(_, edge)| edge.0 == id)
+                .map(|(entity, _)| entity)
+        })
+    {
+        return picked(&mut commands, &selected, add, entity);
     }
 
     let base: Vec<Entity> = if add {
@@ -225,6 +253,26 @@ fn outline(mut gizmos: Gizmos, selected: Query<(&Transform, &NodeRect), With<Sel
             rect.size(),
             OUTLINE,
         );
+    }
+}
+
+fn picked(
+    commands: &mut Commands,
+    selected: &Query<Entity, With<Selected>>,
+    add: bool,
+    entity: Entity,
+) {
+    match (add, selected.contains(entity)) {
+        (true, true) => {
+            commands.entity(entity).remove::<Selected>();
+        }
+        (true, false) => {
+            commands.entity(entity).insert(Selected);
+        }
+        // Already selected: leave the rest of the selection alone, the press is
+        // the start of dragging all of it.
+        (false, true) => {}
+        (false, false) => replace(commands, selected, &[entity]),
     }
 }
 
