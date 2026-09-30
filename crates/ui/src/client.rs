@@ -15,8 +15,6 @@ pub const BASE_URL: &str = "http://127.0.0.1:7777";
 pub const TESTING_SPACE_ID: &str = "kitchen-sink";
 const RETRY_SECS: f32 = 2.0;
 
-/// The space this page is for: the `/s/{id}` segment extd served us under, or
-/// the testing space for a native run and a bare `/`.
 pub fn space_id() -> &'static str {
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| page_space_id().unwrap_or_else(|| TESTING_SPACE_ID.to_owned()))
@@ -49,6 +47,12 @@ pub struct ClientPlugin;
 #[derive(Resource)]
 pub struct Document(pub Canvas);
 
+#[derive(Resource, Default)]
+pub struct Rev(pub String);
+
+#[derive(Resource, Default)]
+pub struct Notice(pub Option<String>);
+
 #[derive(Component)]
 struct ErrorText;
 
@@ -65,7 +69,6 @@ type Inbox = Arc<Mutex<Vec<Update>>>;
 #[derive(Resource)]
 struct Live {
     inbox: Inbox,
-    rev: String,
     subscribed: bool,
     retry: Timer,
 }
@@ -76,7 +79,6 @@ impl Default for Live {
         retry.tick(Duration::from_secs_f32(RETRY_SECS)); // connect on frame one
         Self {
             inbox: Inbox::default(),
-            rev: String::new(),
             subscribed: false,
             retry,
         }
@@ -86,32 +88,45 @@ impl Default for Live {
 impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Live>()
-            .add_systems(Update, (apply, connect).chain());
+            .init_resource::<Rev>()
+            .init_resource::<Notice>()
+            .add_systems(
+                Update,
+                (
+                    (apply, connect).chain(),
+                    show_notice.run_if(resource_changed::<Notice>),
+                ),
+            );
     }
 }
 
-fn connect(time: Res<Time>, mut live: ResMut<Live>) {
+fn connect(time: Res<Time>, mut live: ResMut<Live>, rev: Res<Rev>) {
     if live.subscribed || !live.retry.tick(time.delta()).is_finished() {
         return;
     }
     // Refetch as well as resubscribe: the file can have moved on while we were
     // not listening.
-    fetch(&live.inbox, &live.rev);
+    fetch(&live.inbox, &rev.0);
     subscribe(&live.inbox);
     live.subscribed = true;
 }
 
-fn apply(mut commands: Commands, mut live: ResMut<Live>, errors: Query<(), With<ErrorText>>) {
+fn apply(
+    mut commands: Commands,
+    mut live: ResMut<Live>,
+    mut rev: ResMut<Rev>,
+    mut notice: ResMut<Notice>,
+) {
     let batch = std::mem::take(&mut *lock(&live.inbox));
     for update in batch {
         match update {
-            Update::Loaded(canvas, rev) => {
-                info!("canvas {rev}: {} nodes", canvas.nodes.len());
-                live.rev = rev;
+            Update::Loaded(canvas, loaded) => {
+                info!("canvas {loaded}: {} nodes", canvas.nodes.len());
+                rev.0 = loaded;
                 commands.insert_resource(Document(canvas));
             }
             // A rev we already hold is our own save echoing back off the disk.
-            Update::Changed(rev) if rev != live.rev => fetch(&live.inbox, &live.rev),
+            Update::Changed(changed) if changed != rev.0 => fetch(&live.inbox, &rev.0),
             Update::Changed(_) => {}
             Update::Disconnected => {
                 live.subscribed = false;
@@ -119,27 +134,43 @@ fn apply(mut commands: Commands, mut live: ResMut<Live>, errors: Query<(), With<
             }
             Update::Failed(message) => {
                 error!("{message}");
-                if errors.is_empty() {
-                    commands.spawn((
-                        ErrorText,
-                        Text::new(message),
-                        TextFont::from_font_size(14.0),
-                        TextColor(Color::srgb(0.9, 0.35, 0.35)),
-                        Node {
-                            position_type: PositionType::Absolute,
-                            bottom: Val::Px(8.0),
-                            left: Val::Px(8.0),
-                            ..default()
-                        },
-                    ));
-                }
+                notice.0 = Some(message);
             }
         }
     }
 }
 
+fn show_notice(
+    mut commands: Commands,
+    notice: Res<Notice>,
+    existing: Query<Entity, With<ErrorText>>,
+) {
+    for entity in &existing {
+        commands.entity(entity).despawn();
+    }
+    let Some(message) = &notice.0 else {
+        return;
+    };
+    commands.spawn((
+        ErrorText,
+        Text::new(message.clone()),
+        TextFont::from_font_size(14.0),
+        TextColor(Color::srgb(0.9, 0.35, 0.35)),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(8.0),
+            left: Val::Px(8.0),
+            ..default()
+        },
+    ));
+}
+
+pub fn space_url() -> String {
+    format!("{BASE_URL}/api/spaces/{}", space_id())
+}
+
 fn fetch(inbox: &Inbox, rev: &str) {
-    let mut request = ehttp::Request::get(format!("{BASE_URL}/api/spaces/{}", space_id()));
+    let mut request = ehttp::Request::get(space_url());
     if !rev.is_empty() {
         request
             .headers
@@ -154,7 +185,6 @@ fn fetch(inbox: &Inbox, rev: &str) {
     });
 }
 
-/// `None` is a 304: the document we hold is still the current one.
 fn loaded(result: ehttp::Result<ehttp::Response>) -> Option<Update> {
     // A dead server is a transport error; a live one can still answer 404/500,
     // which ehttp reports as Ok. Both have to read as a failure.
@@ -178,7 +208,7 @@ fn loaded(result: ehttp::Result<ehttp::Response>) -> Option<Update> {
     })
 }
 
-fn etag_rev(response: &ehttp::Response) -> String {
+pub fn etag_rev(response: &ehttp::Response) -> String {
     response
         .headers
         .get("etag")
@@ -187,8 +217,6 @@ fn etag_rev(response: &ehttp::Response) -> String {
         .to_owned()
 }
 
-/// `ehttp::streaming` runs on both targets, so this is one subscription rather
-/// than a native body reader and a wasm `EventSource`.
 fn subscribe(inbox: &Inbox) {
     let mut request = ehttp::Request::get(format!("{BASE_URL}/api/events"));
     request.timeout = None; // the stream is meant to stay open
@@ -217,7 +245,6 @@ fn subscribe(inbox: &Inbox) {
     });
 }
 
-/// Complete SSE frames, leaving any partial tail in `buffer`.
 fn drain_frames(buffer: &mut String) -> Vec<String> {
     let mut frames = Vec::new();
     while let Some(end) = buffer.find("\n\n") {
@@ -227,8 +254,6 @@ fn drain_frames(buffer: &mut String) -> Vec<String> {
     frames
 }
 
-/// The rev a `changed` frame announces for `space`. A lagged frame carries no
-/// rev at all: empty never matches ours, so it refetches.
 fn changed_rev(frame: &str, space: &str) -> Option<String> {
     let mut changed = false;
     let mut data = None;

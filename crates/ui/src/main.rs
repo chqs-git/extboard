@@ -5,6 +5,7 @@ mod hud;
 mod node;
 mod scene;
 mod select;
+mod sync;
 mod text;
 
 use bevy::prelude::*;
@@ -29,6 +30,7 @@ fn main() {
             node::NodePlugin,
             scene::ScenePlugin,
             select::SelectPlugin,
+            sync::SyncPlugin,
             text::TextPlugin,
         ))
         .run();
