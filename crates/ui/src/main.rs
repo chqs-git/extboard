@@ -4,6 +4,7 @@ mod edit;
 mod hud;
 mod node;
 mod scene;
+mod script;
 mod select;
 mod sync;
 mod text;
@@ -22,7 +23,7 @@ fn main() {
             }),
             ..default()
         }))
-        .insert_resource(ClearColor(Color::srgb(0.07, 0.07, 0.09)))
+        .insert_resource(ClearColor(script::DARK))
         .add_plugins((
             camera::CameraPlugin,
             client::ClientPlugin,
@@ -30,6 +31,7 @@ fn main() {
             hud::HudPlugin,
             node::NodePlugin,
             scene::ScenePlugin,
+            script::ScriptPlugin,
             select::SelectPlugin,
             sync::SyncPlugin,
             text::TextPlugin,
