@@ -1,17 +1,4 @@
-//! The HTTP surface. Phase 2.
-//!
-//!   GET  /api/spaces          list
-//!   GET  /api/spaces/{id}     the document + ETag
-//!   PUT  /api/spaces/{id}     whole doc, If-Match
-//!
-//!   GET  /v/{id}              the space as read-only HTML, no JS
-//!   GET  /f/{path}            files from the spaces dir, for the above
-//!
-//! Everything else is the wasm bundle: the hashed assets by name, and
-//! `index.html` for `/` and `/s/{space}` alike — the server never reads
-//! `{space}`, the client reads it back off `window.location`.
-//!
-
+use crate::commands;
 use crate::events::{Events, events, watch};
 use crate::store::{Store, StoreError};
 use crate::view;
@@ -67,9 +54,6 @@ fn app(state: AppState, dist: PathBuf) -> Router {
     router(state, dir).fallback_service(bundle(dist))
 }
 
-/// A hashed asset by name, and `index.html` for every other unmatched path, so
-/// `/s/{space}` needs no route of its own. Compression is on this service and
-/// not the router: brotli across `/api/events` would sit on the SSE frames.
 fn bundle(dist: PathBuf) -> Compression<ServeDir<ServeFile>> {
     let index = ServeFile::new(dist.join("index.html"));
     Compression::new(ServeDir::new(dist).fallback(index)).br(true)
@@ -81,6 +65,7 @@ fn router(state: AppState, dir: PathBuf) -> Router {
         .route("/api/spaces", get(list_spaces))
         .route("/api/spaces/{id}", get(get_space))
         .route("/api/spaces/{id}", put(put_space))
+        .route("/api/commands", get(commands::list))
         .route("/api/events", get(events))
         .route("/v/{id}", get(view_space))
         .nest_service("/f", ServeDir::new(dir))
@@ -97,7 +82,6 @@ async fn view_space(
     Ok(Html(view::page(&id, &canvas)))
 }
 
-/// GET endpoints
 async fn health(State(app): State<AppState>) -> Result<&'static str, StatusCode> {
     match app.store.list() {
         Ok(_) => Ok("ok"),
@@ -184,7 +168,6 @@ fn etag_matches(headers: &HeaderMap, header: HeaderName, etag: &str) -> bool {
         .is_some_and(|sent| sent.as_bytes() == etag.as_bytes())
 }
 
-/// Map StoreError -> StatusCode
 impl IntoResponse for StoreError {
     fn into_response(self) -> Response {
         let status = match &self {
