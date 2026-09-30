@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::client::Document;
+use crate::edit::command;
 
 // Whole documents, which are kilobytes: fifty of them is cheaper than the code
 // an operation log would take to get right.
@@ -104,14 +105,7 @@ fn restore(
     mut document: ResMut<Document>,
     mut history: ResMut<History>,
 ) {
-    // Command on a mac, control everywhere else: both, rather than a cfg for a
-    // modifier nobody presses by accident.
-    if !keys.any_pressed([
-        KeyCode::ControlLeft,
-        KeyCode::ControlRight,
-        KeyCode::SuperLeft,
-        KeyCode::SuperRight,
-    ]) {
+    if !command(&keys) {
         return;
     }
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);

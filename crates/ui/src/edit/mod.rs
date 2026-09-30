@@ -4,12 +4,15 @@ use bevy::window::{CursorIcon, SystemCursorIcon};
 use extboard_core::{Canvas, Edge as CanvasEdge, Node as CanvasNode, NodeKind, Side, fresh_id};
 
 use crate::client::Document;
-use crate::node::{NodeId, NodeRect, to_canvas};
-use crate::scene::{EdgeId, draw_arrow, segments};
+use crate::node::{NodeId, NodeKind as Kind, NodeRect, to_canvas};
+use crate::scene::{draw_arrow, segments};
 use crate::select::{Selected, bounds, cursor_world, pick};
 
 pub const MIN_SIZE: f32 = 40.0;
 const NEW_SIZE: Vec2 = Vec2::new(120.0, 120.0);
+// What a shift-nudge steps by, what a copy is offset by, and what a drag snaps
+// to while alt is held.
+const GRID: f32 = 10.0;
 // Two presses inside both of these are one double-click. Screen pixels, so the
 // slop is the hand's, not the zoom's.
 const DOUBLE_SECS: f32 = 0.4;
@@ -23,6 +26,8 @@ pub const TIP_PX: f32 = 16.0;
 // target at every zoom.
 const ANCHOR_PX: f32 = 5.0;
 const ANCHOR: Color = Color::WHITE;
+// The axis a shift-locked move runs along.
+const AXIS: Color = Color::srgb(0.95, 0.9, 0.35);
 // Screen pixels of reach around an anchor, by what is being asked of it.
 // Showing the circle is a hint and can be generous; landing a drop wider still;
 // but starting a drag has to mean the circle itself, or everything else near a
@@ -30,6 +35,10 @@ const ANCHOR: Color = Color::WHITE;
 const REACH_GRIP: f32 = ANCHOR_PX + 3.0;
 const REACH_HOVER: f32 = 56.0;
 const REACH_DRAG: f32 = 224.0;
+
+mod keys;
+
+pub use keys::command;
 
 pub struct EditPlugin;
 
@@ -78,7 +87,13 @@ impl Plugin for EditPlugin {
                     .chain()
                     .run_if(not(crate::text::editing)),
                 release,
-                (create, delete)
+                (
+                    create,
+                    keys::delete,
+                    keys::nudge,
+                    keys::duplicate,
+                    keys::group,
+                )
                     .run_if(resource_exists::<Document>.and_then(not(crate::text::editing))),
                 cursor,
             )
@@ -98,6 +113,7 @@ fn grab(
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(Entity, &Transform, &NodeRect)>,
+    kinds: Query<&Kind>,
     document: Option<Res<Document>>,
     selected: Query<Entity, With<Selected>>,
 ) {
@@ -158,7 +174,7 @@ fn grab(
     } else {
         vec![picked]
     };
-    let start = moving
+    let start = with_contents(moving, &nodes, &kinds)
         .into_iter()
         .filter_map(|entity| {
             let (_, transform, _) = nodes.get(entity).ok()?;
@@ -169,6 +185,7 @@ fn grab(
 }
 
 fn apply(
+    keys: Res<ButtonInput<KeyCode>>,
     drag: Option<Res<Drag>>,
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
@@ -181,6 +198,14 @@ fn apply(
     let Some(world) = cursor_world(&window, *camera) else {
         return;
     };
+    // Alt snaps to the grid. Off by default: the document is integers already,
+    // and a board someone placed by hand should stay where they put it.
+    let grid = if keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]) {
+        GRID
+    } else {
+        1.0
+    };
+    let locked = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
 
     // The entities are already where the document says; waking change detection
     // would respawn every node and panel mid-gesture, and lose the selection.
@@ -188,9 +213,10 @@ fn apply(
 
     match &*drag {
         Drag::Move { grab, start } => {
+            let delta = travel(world - *grab, locked);
             for &(entity, from) in start {
                 if let Ok(id) = nodes.get(entity) {
-                    moved(canvas, &id.0, from + world - *grab);
+                    moved(canvas, &id.0, from + delta, grid);
                 }
             }
         }
@@ -200,7 +226,12 @@ fn apply(
             start,
         } => {
             if let Ok(id) = nodes.get(*entity) {
-                sized(canvas, &id.0, resized(*start, *handle, world, MIN_SIZE));
+                sized(
+                    canvas,
+                    &id.0,
+                    resized(*start, *handle, world, MIN_SIZE),
+                    grid,
+                );
             }
         }
         // Nothing to write until the drop lands on a node.
@@ -212,22 +243,74 @@ fn node_mut<'a>(canvas: &'a mut Canvas, id: &str) -> Option<&'a mut CanvasNode> 
     canvas.nodes.iter_mut().find(|node| node.id == id)
 }
 
-fn moved(canvas: &mut Canvas, id: &str, center: Vec2) {
+pub(super) fn moved(canvas: &mut Canvas, id: &str, center: Vec2, grid: f32) {
     let Some(node) = node_mut(canvas, id) else {
         return;
     };
     let size = Vec2::new(node.width as f32, node.height as f32);
-    let top_left = to_canvas(center, size);
-    (node.x, node.y) = (top_left.x.round() as i64, top_left.y.round() as i64);
+    let top_left = snapped(to_canvas(center, size), grid);
+    (node.x, node.y) = (top_left.x as i64, top_left.y as i64);
 }
 
-fn sized(canvas: &mut Canvas, id: &str, rect: Rect) {
+fn sized(canvas: &mut Canvas, id: &str, rect: Rect, grid: f32) {
     let Some(node) = node_mut(canvas, id) else {
         return;
     };
-    let top_left = to_canvas(rect.center(), rect.size());
-    (node.x, node.y) = (top_left.x.round() as i64, top_left.y.round() as i64);
-    (node.width, node.height) = (rect.width().round() as i64, rect.height().round() as i64);
+    let top_left = snapped(to_canvas(rect.center(), rect.size()), grid);
+    let size = snapped(rect.size(), grid).max(Vec2::splat(MIN_SIZE));
+    (node.x, node.y) = (top_left.x as i64, top_left.y as i64);
+    (node.width, node.height) = (size.x as i64, size.y as i64);
+}
+
+// Shift locks a move to the axis it has travelled furthest along.
+fn travel(delta: Vec2, locked: bool) -> Vec2 {
+    if !locked {
+        return delta;
+    }
+    if delta.x.abs() >= delta.y.abs() {
+        Vec2::new(delta.x, 0.0)
+    } else {
+        Vec2::new(0.0, delta.y)
+    }
+}
+
+// A grid of one is the rounding the document needs anyway: it holds integers.
+fn snapped(at: Vec2, grid: f32) -> Vec2 {
+    (at / grid).round() * grid
+}
+
+// A group carries its contents: dragging or nudging the box takes what sits
+// inside it along.
+pub(super) fn with_contents(
+    mut moving: Vec<Entity>,
+    nodes: &Query<(Entity, &Transform, &NodeRect)>,
+    kinds: &Query<&Kind>,
+) -> Vec<Entity> {
+    let groups: Vec<(Entity, Rect)> = moving
+        .iter()
+        .filter(|entity| matches!(kinds.get(**entity), Ok(Kind(NodeKind::Group { .. }))))
+        .filter_map(|entity| nodes.get(*entity).ok())
+        .map(|(entity, transform, rect)| (entity, bounds(transform, rect)))
+        .collect();
+
+    for group in groups {
+        for entity in contained(rects(nodes), group) {
+            if !moving.contains(&entity) {
+                moving.push(entity);
+            }
+        }
+    }
+    moving
+}
+
+// Fully inside, so a node straddling the border belongs to what is outside it.
+fn contained(nodes: impl Iterator<Item = (Entity, Rect)>, group: (Entity, Rect)) -> Vec<Entity> {
+    nodes
+        .filter(|&(entity, rect)| {
+            entity != group.0 && group.1.contains(rect.min) && group.1.contains(rect.max)
+        })
+        .map(|(entity, _)| entity)
+        .collect()
 }
 
 #[allow(
@@ -278,29 +361,6 @@ fn create(
     editing.0 = Some(crate::text::Target::Node(id));
 }
 
-fn delete(
-    keys: Res<ButtonInput<KeyCode>>,
-    selected: Query<&NodeId, With<Selected>>,
-    edges: Query<&EdgeId, With<Selected>>,
-    mut document: ResMut<Document>,
-) {
-    // Mac's delete key is Backspace.
-    if (selected.is_empty() && edges.is_empty())
-        || !keys.any_just_pressed([KeyCode::Delete, KeyCode::Backspace])
-    {
-        return;
-    }
-    let canvas = &mut document.0;
-    for id in &selected {
-        // Cascades the node's edges; a stale selection entity is not an error.
-        let _ = canvas.remove_node(&id.0);
-    }
-    // After the nodes: a cascade may already have taken this edge with it.
-    for id in &edges {
-        let _ = canvas.remove_edge(&id.0);
-    }
-}
-
 pub fn double_click(last: &mut Option<(f32, Vec2)>, now: f32, at: Vec2) -> bool {
     let again = last
         .is_some_and(|(then, there)| now - then <= DOUBLE_SECS && there.distance(at) <= DOUBLE_PX);
@@ -310,6 +370,17 @@ pub fn double_click(last: &mut Option<(f32, Vec2)>, now: f32, at: Vec2) -> bool 
 }
 
 pub fn created(canvas: &mut Canvas, seed: u32, rect: Rect) -> String {
+    added(
+        canvas,
+        seed,
+        rect,
+        NodeKind::Text {
+            text: String::new(),
+        },
+    )
+}
+
+pub(super) fn added(canvas: &mut Canvas, seed: u32, rect: Rect, kind: NodeKind) -> String {
     let top_left = to_canvas(rect.center(), rect.size());
     let id = fresh_id(canvas, &seed.to_le_bytes());
     canvas
@@ -320,9 +391,7 @@ pub fn created(canvas: &mut Canvas, seed: u32, rect: Rect) -> String {
             width: rect.width().round() as i64,
             height: rect.height().round() as i64,
             color: None,
-            kind: NodeKind::Text {
-                text: String::new(),
-            },
+            kind,
             extra: default(),
         })
         .expect("fresh_id never collides");
@@ -331,8 +400,13 @@ pub fn created(canvas: &mut Canvas, seed: u32, rect: Rect) -> String {
 
 // The one anchor within reach shows where an edge can start; a live drag shows
 // where it would land.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
 fn anchors(
     mut gizmos: Gizmos,
+    keys: Res<ButtonInput<KeyCode>>,
     drag: Option<Res<Drag>>,
     document: Option<Res<Document>>,
     window: Single<&Window>,
@@ -345,6 +419,24 @@ fn anchors(
     else {
         return;
     };
+
+    // The axis a locked move is running along. Without it a locked drag reads as
+    // a stuck one.
+    if let Some(Drag::Move { grab, start }) = drag.as_deref()
+        && keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight])
+        && let Some(at) = moving_center(start, &nodes)
+    {
+        let axis = if travel(world - *grab, true).y == 0.0 {
+            Vec2::X
+        } else {
+            Vec2::Y
+        };
+        // Half the viewport's diagonal each way: the line runs off screen at
+        // every zoom without a magic length.
+        let reach = axis * window.size().length() * ortho.scale;
+        gizmos.line_2d(at - reach, at + reach, AXIS);
+    }
+
     // A move or resize is already under way; anchors would only be clutter.
     let drawing = matches!(
         drag.as_deref(),
@@ -383,6 +475,20 @@ fn anchors(
     if let Some((_, _, at)) = anchor_under(rects(&nodes), projection, world, reach) {
         gizmos.circle_2d(at, ANCHOR_PX * ortho.scale, ANCHOR);
     }
+}
+
+// The middle of everything the drag is carrying, which for one node is its own
+// centre.
+fn moving_center(
+    start: &[(Entity, Vec2)],
+    nodes: &Query<(Entity, &Transform, &NodeRect)>,
+) -> Option<Vec2> {
+    start
+        .iter()
+        .filter_map(|&(entity, _)| nodes.get(entity).ok())
+        .map(|(_, transform, rect)| bounds(transform, rect))
+        .reduce(|a, b| a.union(b))
+        .map(|all| all.center())
 }
 
 pub fn rects<'a>(

@@ -1,6 +1,6 @@
 use bevy::input_focus::AutoFocus;
 use bevy::prelude::*;
-use bevy::text::{EditableText, TextCursorStyle};
+use bevy::text::{EditableText, TextCursorStyle, TextEdit};
 use extboard_core::{Canvas, NodeKind};
 
 use crate::camera::world_to_screen;
@@ -105,6 +105,17 @@ pub(super) fn track_label(
 // Source while editing, rendered at rest: the buffer is the node's raw markdown,
 // and the styled span tree is never edited.
 pub(super) fn editor(md: &str) -> impl Bundle {
+    let mut buffer = EditableText {
+        allow_newlines: true,
+        // The node's own height, not a line count.
+        visible_lines: None,
+        ..EditableText::new(md)
+    };
+    // Open at the top. `new` leaves the caret at the end, and the editor scrolls
+    // to keep it in view, so a source taller than its node opens mid-text with
+    // the caret's own width scrolled off the left.
+    buffer.queue_edit(TextEdit::TextStart(false));
+
     (
         Editor,
         // Fills the content box; the clip box above it does the clipping.
@@ -113,12 +124,7 @@ pub(super) fn editor(md: &str) -> impl Bundle {
             height: percent(100.0),
             ..default()
         },
-        EditableText {
-            allow_newlines: true,
-            // The node's own height, not a line count.
-            visible_lines: None,
-            ..EditableText::new(md)
-        },
+        buffer,
         TextLayout {
             linebreak: LineBreak::WordOrCharacter,
             ..default()
