@@ -5,6 +5,7 @@ use extboard_core::{Canvas, Edge as CanvasEdge, Node as CanvasNode, NodeKind, Si
 
 use crate::client::Document;
 use crate::node::{NodeId, NodeRect, to_canvas};
+use crate::scene::{EdgeId, draw_arrow, segments};
 use crate::select::{Selected, bounds, cursor_world, pick};
 
 pub const MIN_SIZE: f32 = 40.0;
@@ -15,15 +16,20 @@ const DOUBLE_SECS: f32 = 0.4;
 const DOUBLE_PX: f32 = 6.0;
 // Screen pixels, so the grip is the same target at every zoom.
 const GRIP_PX: f32 = 12.0;
+// The grip on the end of an edge: what is aimed at is the arrowhead, which is
+// wider than the anchor circle sitting under its tip.
+pub const TIP_PX: f32 = 16.0;
 // The side anchor an edge starts from, in screen pixels so it is the same
 // target at every zoom.
 const ANCHOR_PX: f32 = 5.0;
 const ANCHOR: Color = Color::WHITE;
-// How near the cursor has to be for an anchor to show. Wider once an edge is
-// being drawn, so the far end is easy to land on.
-const REACH_PX: f32 = 28.0;
-const REACH_HOVER: f32 = 2.0;
-const REACH_DRAG: f32 = 8.0;
+// Screen pixels of reach around an anchor, by what is being asked of it.
+// Showing the circle is a hint and can be generous; landing a drop wider still;
+// but starting a drag has to mean the circle itself, or everything else near a
+// node's side, the tip of a selected edge included, is unreachable.
+const REACH_GRIP: f32 = ANCHOR_PX + 3.0;
+const REACH_HOVER: f32 = 56.0;
+const REACH_DRAG: f32 = 224.0;
 
 pub struct EditPlugin;
 
@@ -42,6 +48,17 @@ enum Drag {
         from: Entity,
         side: Side,
     },
+    // Which end of which edge is being dragged onto a new target.
+    Redirect {
+        edge: String,
+        tip: Tip,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Tip {
+    From,
+    To,
 }
 
 impl Plugin for EditPlugin {
@@ -70,6 +87,10 @@ impl Plugin for EditPlugin {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
 fn grab(
     mut commands: Commands,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -77,6 +98,7 @@ fn grab(
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(Entity, &Transform, &NodeRect)>,
+    document: Option<Res<Document>>,
     selected: Query<Entity, With<Selected>>,
 ) {
     let (camera, cam_global, projection) = *camera;
@@ -90,10 +112,19 @@ fn grab(
         return;
     };
 
-    // Before the resize band: an anchor sits on a side, and drawing an edge from
-    // it has to beat dragging that side.
-    if let Some((from, side, _)) = anchor_under(rects(&nodes), projection, world, false) {
+    // An edge ends on the very anchor that starts a new one, so the circle keeps
+    // the pixel it is drawn on and the arrowhead around it takes the rest: one
+    // gesture per visible target, neither of them needing a selection first.
+    if let Some((from, side, _)) = anchor_under(rects(&nodes), projection, world, Reach::Grip) {
         commands.insert_resource(Drag::Edge { from, side });
+        return;
+    }
+
+    // Before the resize band, which claims the same boundary.
+    if let Some(document) = document.as_deref()
+        && let Some((edge, tip)) = tip_under(&document.0, world, TIP_PX * ortho.scale)
+    {
+        commands.insert_resource(Drag::Redirect { edge, tip });
         return;
     }
 
@@ -173,7 +204,7 @@ fn apply(
             }
         }
         // Nothing to write until the drop lands on a node.
-        Drag::Edge { .. } => {}
+        Drag::Edge { .. } | Drag::Redirect { .. } => {}
     }
 }
 
@@ -244,22 +275,29 @@ fn create(
     );
     // A node made by double-clicking opens for typing, so the gesture is one
     // move: double-click, type.
-    editing.0 = Some(id);
+    editing.0 = Some(crate::text::Target::Node(id));
 }
 
 fn delete(
     keys: Res<ButtonInput<KeyCode>>,
     selected: Query<&NodeId, With<Selected>>,
+    edges: Query<&EdgeId, With<Selected>>,
     mut document: ResMut<Document>,
 ) {
     // Mac's delete key is Backspace.
-    if selected.is_empty() || !keys.any_just_pressed([KeyCode::Delete, KeyCode::Backspace]) {
+    if (selected.is_empty() && edges.is_empty())
+        || !keys.any_just_pressed([KeyCode::Delete, KeyCode::Backspace])
+    {
         return;
     }
     let canvas = &mut document.0;
     for id in &selected {
         // Cascades the node's edges; a stale selection entity is not an error.
         let _ = canvas.remove_node(&id.0);
+    }
+    // After the nodes: a cascade may already have taken this edge with it.
+    for id in &edges {
+        let _ = canvas.remove_edge(&id.0);
     }
 }
 
@@ -296,6 +334,7 @@ pub fn created(canvas: &mut Canvas, seed: u32, rect: Rect) -> String {
 fn anchors(
     mut gizmos: Gizmos,
     drag: Option<Res<Drag>>,
+    document: Option<Res<Document>>,
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(Entity, &Transform, &NodeRect)>,
@@ -307,17 +346,41 @@ fn anchors(
         return;
     };
     // A move or resize is already under way; anchors would only be clutter.
-    let drawing = matches!(drag.as_deref(), Some(Drag::Edge { .. }));
+    let drawing = matches!(
+        drag.as_deref(),
+        Some(Drag::Edge { .. } | Drag::Redirect { .. })
+    );
     if drag.is_some() && !drawing {
         return;
     }
-    if let Some(Drag::Edge { from, side }) = drag.as_deref()
-        && let Ok((_, transform, rect)) = nodes.get(*from)
-    {
-        gizmos.line_2d(anchor(bounds(transform, rect), *side), world, ANCHOR);
+    // The preview carries its arrowhead: a drag should look like the edge it is
+    // about to become, pointing wherever the head will end up.
+    match drag.as_deref() {
+        Some(Drag::Edge { from, side }) => {
+            if let Ok((_, transform, rect)) = nodes.get(*from) {
+                let start = anchor(bounds(transform, rect), *side);
+                draw_arrow(&mut gizmos, start, world, (false, true), None, ANCHOR);
+            }
+        }
+        // The end staying put is the one the line is drawn from, and dragging the
+        // tail leaves the head on it.
+        Some(Drag::Redirect { edge, tip }) => {
+            if let Some(document) = document.as_deref()
+                && let Some((_, a, b)) = segments(&document.0).find(|(id, _, _)| *id == edge)
+            {
+                let (start, end) = if *tip == Tip::From {
+                    (world, b)
+                } else {
+                    (a, world)
+                };
+                draw_arrow(&mut gizmos, start, end, (false, true), None, ANCHOR);
+            }
+        }
+        _ => {}
     }
 
-    if let Some((_, _, at)) = anchor_under(rects(&nodes), projection, world, drawing) {
+    let reach = if drawing { Reach::Drag } else { Reach::Hover };
+    if let Some((_, _, at)) = anchor_under(rects(&nodes), projection, world, reach) {
         gizmos.circle_2d(at, ANCHOR_PX * ortho.scale, ANCHOR);
     }
 }
@@ -330,17 +393,33 @@ pub fn rects<'a>(
         .map(|(entity, transform, rect)| (entity, bounds(transform, rect)))
 }
 
+#[derive(Clone, Copy)]
+pub enum Reach {
+    Grip,
+    Hover,
+    Drag,
+}
+
+impl Reach {
+    fn px(self) -> f32 {
+        match self {
+            Reach::Grip => REACH_GRIP,
+            Reach::Hover => REACH_HOVER,
+            Reach::Drag => REACH_DRAG,
+        }
+    }
+}
+
 pub fn anchor_under(
     nodes: impl Iterator<Item = (Entity, Rect)>,
     projection: &Projection,
     point: Vec2,
-    drawing: bool,
+    reach: Reach,
 ) -> Option<(Entity, Side, Vec2)> {
     let Projection::Orthographic(ortho) = projection else {
         return None;
     };
-    let reach = if drawing { REACH_DRAG } else { REACH_HOVER };
-    nearest_anchor(nodes, point, REACH_PX * reach * ortho.scale)
+    nearest_anchor(nodes, point, reach.px() * ortho.scale)
 }
 
 fn nearest_anchor(
@@ -354,7 +433,8 @@ fn nearest_anchor(
         .min_by(|a, b| a.2.distance(point).total_cmp(&b.2.distance(point)))
 }
 
-// Landing on a node makes the edge; anywhere else drops it.
+// Landing on a node makes the edge, or moves the end being dragged; anywhere
+// else drops the gesture.
 #[allow(
     clippy::too_many_arguments,
     reason = "a system's arguments are its query"
@@ -370,7 +450,7 @@ fn connect(
     mut document: ResMut<Document>,
 ) {
     let (camera, cam_global, projection) = *camera;
-    let Some(Drag::Edge { from, side }) = drag.as_deref() else {
+    let Some(drag @ (Drag::Edge { .. } | Drag::Redirect { .. })) = drag.as_deref() else {
         return;
     };
     if buttons.pressed(MouseButton::Left) {
@@ -379,8 +459,38 @@ fn connect(
     let Some(world) = cursor_world(&window, (camera, cam_global)) else {
         return;
     };
-    // Inside a node, or on the anchor that is showing just off one of its sides.
-    let Some((target, to_side)) = pick(
+    let Some((target, to_side)) = dropped_on(&nodes, projection, world) else {
+        return;
+    };
+    let Ok(end) = ids.get(target) else {
+        return;
+    };
+
+    match drag {
+        Drag::Edge { from, side } => {
+            if let Ok(start) = ids.get(*from) {
+                connected(
+                    &mut document.0,
+                    frames.0,
+                    (&start.0, *side),
+                    (&end.0, to_side),
+                );
+            }
+        }
+        Drag::Redirect { edge, tip } => {
+            redirected(&mut document.0, edge, *tip, (&end.0, to_side));
+        }
+        _ => {}
+    }
+}
+
+// Inside a node, or on the anchor that is showing just off one of its sides.
+fn dropped_on(
+    nodes: &Query<(Entity, &Transform, &NodeRect)>,
+    projection: &Projection,
+    world: Vec2,
+) -> Option<(Entity, Side)> {
+    pick(
         nodes.iter().map(|(entity, transform, rect)| {
             (entity, bounds(transform, rect), transform.translation.z)
         }),
@@ -391,19 +501,39 @@ fn connect(
         Some((entity, nearest_side(bounds(transform, rect), world)))
     })
     .or_else(|| {
-        anchor_under(rects(&nodes), projection, world, true).map(|(entity, side, _)| (entity, side))
-    }) else {
-        return;
+        anchor_under(rects(nodes), projection, world, Reach::Drag)
+            .map(|(entity, side, _)| (entity, side))
+    })
+}
+
+pub fn tip_under(canvas: &Canvas, point: Vec2, reach: f32) -> Option<(String, Tip)> {
+    segments(canvas)
+        .flat_map(|(id, a, b)| [(id, Tip::From, a), (id, Tip::To, b)])
+        .map(|(id, tip, at)| (id, tip, at.distance(point)))
+        .filter(|(_, _, distance)| *distance <= reach)
+        .min_by(|a, b| a.2.total_cmp(&b.2))
+        .map(|(id, tip, _)| (id.to_owned(), tip))
+}
+
+// `false` when the move was refused: an edge with both ends on one node is not
+// a link, same as one drawn that way.
+fn redirected(canvas: &mut Canvas, id: &str, tip: Tip, to: (&str, Side)) -> bool {
+    let Some(edge) = canvas.edges.iter_mut().find(|edge| edge.id == id) else {
+        return false;
     };
-    let (Ok(start), Ok(end)) = (ids.get(*from), ids.get(target)) else {
-        return;
+    let other = if tip == Tip::From {
+        &edge.to_node
+    } else {
+        &edge.from_node
     };
-    connected(
-        &mut document.0,
-        frames.0,
-        (&start.0, *side),
-        (&end.0, to_side),
-    );
+    if other == to.0 {
+        return false;
+    }
+    match tip {
+        Tip::From => (edge.from_node, edge.from_side) = (to.0.to_owned(), Some(to.1)),
+        Tip::To => (edge.to_node, edge.to_side) = (to.0.to_owned(), Some(to.1)),
+    }
+    true
 }
 
 const SIDES: [Side; 4] = [Side::Top, Side::Bottom, Side::Left, Side::Right];
@@ -477,7 +607,7 @@ fn cursor(
     let want = match drag.as_deref() {
         Some(Drag::Resize { handle, .. }) => resize_cursor(*handle),
         Some(Drag::Move { .. }) => SystemCursorIcon::Grabbing,
-        Some(Drag::Edge { .. }) => SystemCursorIcon::Crosshair,
+        Some(Drag::Edge { .. } | Drag::Redirect { .. }) => SystemCursorIcon::Crosshair,
         None => hovered_handle(window, (camera, cam_global), projection, &nodes, &selected)
             .map_or(SystemCursorIcon::Default, resize_cursor),
     };

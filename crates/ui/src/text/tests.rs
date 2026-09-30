@@ -1,6 +1,6 @@
 use super::edit_text::written_back;
 use super::*;
-use extboard_core::Canvas;
+use extboard_core::{Canvas, Edge};
 
 // The scaled content's corner, relative to the clip box's. Non-zero clips.
 fn content_top_left(size: Vec2, zoom: f32) -> Vec2 {
@@ -27,16 +27,50 @@ fn canvas(text: &str) -> Canvas {
     }
 }
 
+fn node(id: &str) -> Target {
+    Target::Node(id.to_owned())
+}
+
 #[test]
 fn only_a_changed_buffer_is_written_back() {
     let mut got = canvas("before");
-    assert!(written_back(&mut got, "n", "after"));
+    assert!(written_back(&mut got, &node("n"), "after"));
     assert_eq!(markdown(&got.nodes[0]), Some("after"));
 
     // Opened and closed without typing: the document must not be woken.
-    assert!(!written_back(&mut got, "n", "after"));
+    assert!(!written_back(&mut got, &node("n"), "after"));
     // And a node that is gone, or was never text, is not an error.
-    assert!(!written_back(&mut got, "gone", "after"));
+    assert!(!written_back(&mut got, &node("gone"), "after"));
+}
+
+#[test]
+fn an_emptied_label_is_dropped_rather_than_written_blank() {
+    let mut got = canvas("");
+    got.edges.push(Edge {
+        id: "e1".to_owned(),
+        from_node: "n".to_owned(),
+        from_side: None,
+        from_end: None,
+        to_node: "n".to_owned(),
+        to_side: None,
+        to_end: None,
+        label: None,
+        extra: default(),
+    });
+    let edge = Target::Edge("e1".to_owned());
+
+    assert!(written_back(&mut got, &edge, "depends on"));
+    assert_eq!(got.edges[0].label.as_deref(), Some("depends on"));
+    assert!(!written_back(&mut got, &edge, "depends on"));
+
+    // Cleared in the editor: the key goes, it does not become "".
+    assert!(written_back(&mut got, &edge, ""));
+    assert_eq!(got.edges[0].label, None);
+    assert!(!written_back(
+        &mut got,
+        &Target::Edge("gone".to_owned()),
+        "x"
+    ));
 }
 
 #[test]

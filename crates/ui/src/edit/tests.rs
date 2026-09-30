@@ -269,3 +269,101 @@ fn an_edge_records_both_sides_and_never_joins_a_node_to_itself() {
     );
     assert_eq!((&edge.from_node, &edge.to_node), (&"n".to_owned(), &other));
 }
+
+// The bug this splits apart: anything within the hint's reach of a side used to
+// start a new edge, so the tip of a selected edge sitting there was ungrabbable.
+#[test]
+fn only_the_circle_itself_grips_and_the_hint_reaches_much_further() {
+    let entity = Entity::from_raw_u32(1).unwrap();
+    let nodes = || [(entity, NODE)].into_iter();
+    let near = Vec2::new(220.0, 52.0);
+
+    assert!(nearest_anchor(nodes(), near, Reach::Grip.px()).is_none());
+    assert!(nearest_anchor(nodes(), near, Reach::Hover.px()).is_some());
+    // On the circle, which is what a press has to mean now.
+    let on = anchor(NODE, Side::Right) + Vec2::new(2.0, 2.0);
+    assert!(nearest_anchor(nodes(), on, Reach::Grip.px()).is_some());
+}
+
+// Both gestures start from the same point, so the circle is the smaller target
+// and `grab` asks for it first: what is left over is the arrowhead around it.
+#[test]
+fn an_edge_end_is_held_by_the_arrowhead_and_the_nearer_end_wins() {
+    let mut canvas = canvas();
+    let other = created(&mut canvas, 1, Rect::from_center_size(Vec2::ZERO, NEW_SIZE));
+    assert!(connected(
+        &mut canvas,
+        2,
+        ("n", Side::Right),
+        (&other, Side::Left)
+    ));
+    let edge = canvas.edges[0].id.clone();
+    let (_, from, to) = segments(&canvas).next().unwrap();
+
+    assert!(TIP_PX > Reach::Grip.px());
+    assert_eq!(
+        tip_under(&canvas, from, TIP_PX),
+        Some((edge.clone(), Tip::From))
+    );
+    assert_eq!(tip_under(&canvas, to, TIP_PX), Some((edge, Tip::To)));
+    // Out along the shaft, past either head.
+    assert_eq!(tip_under(&canvas, from.midpoint(to), TIP_PX), None);
+}
+
+#[test]
+fn a_redirect_moves_one_end_and_leaves_the_other_where_it_was() {
+    let mut canvas = canvas();
+    let second = created(&mut canvas, 1, Rect::from_center_size(Vec2::ZERO, NEW_SIZE));
+    let third = created(&mut canvas, 2, Rect::from_center_size(Vec2::X, NEW_SIZE));
+    assert!(connected(
+        &mut canvas,
+        3,
+        ("n", Side::Right),
+        (&second, Side::Left)
+    ));
+    let edge = canvas.edges[0].id.clone();
+
+    assert!(redirected(&mut canvas, &edge, Tip::To, (&third, Side::Top)));
+    let moved = &canvas.edges[0];
+    assert_eq!((&moved.to_node, moved.to_side), (&third, Some(Side::Top)));
+    assert_eq!(
+        (&moved.from_node, moved.from_side),
+        (&"n".to_owned(), Some(Side::Right))
+    );
+
+    // The other way round, and the far end is still the one just landed on.
+    assert!(redirected(
+        &mut canvas,
+        &edge,
+        Tip::From,
+        (&second, Side::Bottom)
+    ));
+    let moved = &canvas.edges[0];
+    assert_eq!(
+        (&moved.from_node, moved.from_side),
+        (&second, Some(Side::Bottom))
+    );
+    assert_eq!(&moved.to_node, &third);
+}
+
+#[test]
+fn a_redirect_onto_the_other_end_is_refused_and_an_unknown_edge_is_not_a_panic() {
+    let mut canvas = canvas();
+    let other = created(&mut canvas, 1, Rect::from_center_size(Vec2::ZERO, NEW_SIZE));
+    assert!(connected(
+        &mut canvas,
+        2,
+        ("n", Side::Right),
+        (&other, Side::Left)
+    ));
+    let edge = canvas.edges[0].id.clone();
+
+    assert!(!redirected(&mut canvas, &edge, Tip::To, ("n", Side::Top)));
+    assert_eq!(&canvas.edges[0].to_node, &other);
+    assert!(!redirected(
+        &mut canvas,
+        "gone",
+        Tip::To,
+        (&other, Side::Top)
+    ));
+}
