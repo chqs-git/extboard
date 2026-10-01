@@ -231,7 +231,7 @@ impl Script {
         match self.engine.compile(source) {
             Err(e) => compiled.error = Some(fault(e)),
             Ok(ast) => {
-                let ran = self.engine.run_ast(&ast).map_err(fault);
+                let ran = self.engine.run_ast(&ast).map_err(|e| thrown(&e));
                 let handlers = std::mem::take(&mut lock(&self.pending).handlers);
                 let applied = self.apply(canvas);
                 match ran.and(applied) {
@@ -277,7 +277,7 @@ impl Script {
                 };
                 for handler in handlers {
                     if let Err(e) = handler.call::<()>(&self.engine, &compiled.ast, ()) {
-                        failed = Some(fault(e));
+                        failed = Some(thrown(&e));
                     }
                 }
             }
@@ -541,6 +541,16 @@ fn set_theme(canvas: &mut Canvas, name: &str) {
 
 fn fault(e: impl std::fmt::Display) -> String {
     format!("script: {e}")
+}
+
+// A parse error prints its own position; a runtime one hangs it off the error
+// instead, so a throw would otherwise say only what went wrong and not where.
+fn thrown(e: &rhai::EvalAltResult) -> String {
+    let at = e.position();
+    if at.is_none() {
+        return fault(e);
+    }
+    fault(format!("{e} ({at})"))
 }
 
 // Script errors stay on the script (the sidebar says which one and why), so
@@ -1468,6 +1478,20 @@ mod tests {
 
         script.fire("n7", &mut canvas);
         assert_eq!(theme_name(&canvas), Some("dark"), "the old handler runs");
+    }
+
+    // The ticket's done-when: an invalid script says which line, and a handler
+    // that throws says so rather than failing silently on the click.
+    #[test]
+    fn an_error_says_which_line_it_happened_on() {
+        let (script, _) = scripted("on_click(\"n7\", || {\n  set_theme(\"dark\");\n");
+        let e = error(&script, MAIN).expect("unclosed block");
+        assert!(e.contains("line"), "{e}");
+
+        let (mut script, mut canvas) = scripted("on_click(\"n7\", || {\n  throw \"boom\";\n});");
+        script.fire("n7", &mut canvas);
+        let e = error(&script, MAIN).expect("the handler threw");
+        assert!(e.contains("boom") && e.contains("line 2"), "{e}");
     }
 
     // The point of naming them: your typo in one script is not everyone else's

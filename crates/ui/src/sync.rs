@@ -110,7 +110,9 @@ fn adopt(
                 clear(&mut notice);
             }
             // Whole-document saves cannot merge, so the server wins and the
-            // dropped edit is said out loud rather than replayed.
+            // dropped edit is said out loud rather than replayed. A handler's
+            // write is no different: the lambda already ran, and re-running it
+            // would double whatever else it did, so the click is lost too.
             Reply::Conflict(canvas, rev) => {
                 document.0 = canvas;
                 base.0 = rev;
