@@ -13,6 +13,10 @@ serde_json.workspace = true
 ehttp = { version = "0.7", features = ["streaming"] }
 # Node markdown (E3-T6).
 pulldown-cmark = { version = "0.13", default-features = false, features = ["simd"] }
+# Board scripts (E6-T4). `sync` is what lets the engine live in a resource;
+# `no_module` drops `import` and with it the file-backed module resolver, which
+# is the one way stock Rhai reaches outside the document.
+rhai = { version = "1", default-features = false, features = ["std", "sync", "no_module", "no_time", "no_custom_syntax"] }
 
 # No defaults. The `2d`/`ui` bundles pull gilrs, audio, sysinfo and the whole
 # 3D pipeline; this list is the other direction — add a feature when something
