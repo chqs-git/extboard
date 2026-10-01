@@ -297,3 +297,37 @@ fn removing_an_unknown_edge_is_an_error() {
     );
     assert_eq!(c, before);
 }
+
+// A colour a renderer does not understand draws as no colour at all, so writing
+// one has to be an error rather than an edit that silently did nothing.
+#[test]
+fn set_color_takes_the_presets_and_hex_and_nothing_else() {
+    let mut c = canvas(&[node("n")], &[]);
+
+    for good in ["1", "6", "#1a2b3c", "#ABCDEF"] {
+        c.set_color("n", Some(good)).unwrap();
+        assert_eq!(c.nodes[0].color.as_deref(), Some(good));
+    }
+
+    // Cleared, which puts the node back on the colour its kind gets.
+    c.set_color("n", None).unwrap();
+    assert_eq!(c.nodes[0].color, None);
+    assert!(validate(&c).is_ok());
+
+    for bad in ["0", "7", "banana", "#abc", "#12345g", "1a2b3c", ""] {
+        assert_eq!(
+            c.set_color("n", Some(bad)),
+            Err(MutationError::InvalidColor {
+                node: "n".into(),
+                color: bad.into(),
+            }),
+            "{bad}"
+        );
+        assert_eq!(c.nodes[0].color, None, "a refused colour writes nothing");
+    }
+
+    assert_eq!(
+        c.set_color("ghost", Some("1")),
+        Err(MutationError::NoSuchNode("ghost".into()))
+    );
+}

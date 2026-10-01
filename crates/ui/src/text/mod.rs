@@ -33,6 +33,11 @@ const MONO: Color = Color::srgb(0.7, 0.85, 0.72);
 const CODE_BG: Color = Color::srgb(0.06, 0.07, 0.09);
 const RULE: Color = Color::srgb(0.25, 0.27, 0.32);
 
+// The frame's press, as the editors read it. Anything that means to consume a
+// click before they see it orders itself before this.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ReadPress;
+
 pub struct TextPlugin;
 
 impl Plugin for TextPlugin {
@@ -43,6 +48,7 @@ impl Plugin for TextPlugin {
             .add_systems(
                 PreUpdate,
                 toggle
+                    .in_set(ReadPress)
                     .after(InputSystems)
                     .run_if(resource_exists::<Document>),
             )
