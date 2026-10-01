@@ -17,6 +17,10 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["simd
 # `no_module` drops `import` and with it the file-backed module resolver, which
 # is the one way stock Rhai reaches outside the document.
 rhai = { version = "1", default-features = false, features = ["std", "sync", "no_module", "no_time", "no_custom_syntax"] }
+# `now()` for E6-T8. Rhai is built with `no_time`, and a local clock is not a
+# few lines of our own: `clock` is the system timezone, `wasmbind` is the same
+# answer out of the browser's `Date`, and both have to agree about DST.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "wasmbind"] }
 
 # No defaults. The `2d`/`ui` bundles pull gilrs, audio, sysinfo and the whole
 # 3D pipeline; this list is the other direction — add a feature when something

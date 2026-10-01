@@ -2,8 +2,8 @@ use bevy::input_focus::{FocusCause, InputFocus};
 use bevy::prelude::*;
 use bevy::text::{EditableText, TextCursorStyle, TextEdit};
 use bevy::ui::widget::TextScroll;
-use extboard_core::Canvas;
-use rhai::{AST, Engine, FnPtr};
+use extboard_core::{Canvas, rev};
+use rhai::{AST, Engine, EvalAltResult, FnPtr};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -18,6 +18,9 @@ use crate::text::{Editing, Target, wrap};
 // would freeze the window. The budget turns that hang into an error message.
 const MAX_OPS: u64 = 200_000;
 const MAX_CALLS: usize = 32;
+// `every(0, ..)` would write the document on every frame. A clock to the minute
+// is what this is for, so a second is as fine-grained as it needs to be.
+const MIN_EVERY: i64 = 1;
 // A press that travelled this far is a drag, and the node went with it.
 const SLOP_PX: f32 = 4.0;
 pub const DARK: Color = Color::srgb(0.07, 0.07, 0.09);
@@ -64,7 +67,35 @@ enum Effect {
 #[derive(Default)]
 struct Pending {
     handlers: HashMap<String, Vec<FnPtr>>,
+    timers: Vec<Tick>,
     effects: Vec<Effect>,
+    // The instant `now()` answers for the run in progress. A timer sets it to
+    // the start of the slot it is firing for, never to the wall clock: reading
+    // the clock twice lets one client's frame straddle a boundary and compute
+    // the next slot's value, and then two clients fight over the node forever.
+    at: i64,
+}
+
+// An `every()` registration. The interval cuts the wall clock into slots and
+// the timer runs once per slot, so two clients that opened the board minutes
+// apart still fire on the same instants and compute the same value. Nobody is
+// elected: the first write lands and the rest are no-ops, because identical
+// content leaves the document's rev alone.
+struct Tick {
+    every: i64,
+    fired: i64,
+    handler: FnPtr,
+}
+
+impl Tick {
+    fn slot(&self, now: i64) -> i64 {
+        now.div_euclid(self.every)
+    }
+}
+
+// Seconds since the epoch, the one clock every client already agrees on.
+fn now_secs() -> i64 {
+    chrono::Utc::now().timestamp()
 }
 
 // Open or closed. Focus is `Editing`'s, so every system that already stands
@@ -120,6 +151,7 @@ struct StatusLine;
 struct Compiled {
     ast: AST,
     handlers: HashMap<String, Vec<FnPtr>>,
+    timers: Vec<Tick>,
     // What last compiled, so an unchanged script is not rebuilt every frame.
     source: String,
     // The script is not doing what it says: it would not compile, or it threw.
@@ -145,6 +177,9 @@ impl Plugin for ScriptPlugin {
         // one of those is a panic on the frames before the first load.
         app.insert_resource(Script::new())
             .init_resource::<Sidebar>()
+            // `tick` writes it and `sync` reads it; either plugin may be the
+            // one that got added, so neither assumes the other did this.
+            .init_resource::<crate::sync::Ticked>()
             .add_systems(
                 PreUpdate,
                 swallow
@@ -171,7 +206,11 @@ impl Plugin for ScriptPlugin {
                         // none of these may ask for it before it exists.
                         .run_if(resource_exists::<Document>.and_then(resource_exists::<Editing>)),
                     // Typing is not clicking, and an edit session owns the mouse.
-                    click.run_if(resource_exists::<Document>.and_then(not(crate::text::editing))),
+                    // A tick writes the document, which respawns every node: an
+                    // open editor owns it until it is closed, or a clock would
+                    // take the paragraph being typed into one with it.
+                    (click, tick)
+                        .run_if(resource_exists::<Document>.and_then(not(crate::text::editing))),
                 )
                     .chain(),
             )
@@ -226,17 +265,29 @@ impl Script {
     fn load(&mut self, name: &str, source: &str, canvas: &mut Canvas) {
         let mut compiled = self.scripts.remove(name).unwrap_or_else(Compiled::empty);
         compiled.source = source.to_owned();
-        lock(&self.pending).handlers.clear();
+        self.at(now_secs());
+        {
+            let mut pending = lock(&self.pending);
+            pending.handlers.clear();
+            pending.timers.clear();
+        }
 
         match self.engine.compile(source) {
             Err(e) => compiled.error = Some(fault(e)),
             Ok(ast) => {
                 let ran = self.engine.run_ast(&ast).map_err(|e| thrown(&e));
-                let handlers = std::mem::take(&mut lock(&self.pending).handlers);
+                let (handlers, timers) = {
+                    let mut pending = lock(&self.pending);
+                    (
+                        std::mem::take(&mut pending.handlers),
+                        std::mem::take(&mut pending.timers),
+                    )
+                };
                 let applied = self.apply(canvas);
                 match ran.and(applied) {
                     Ok(()) => {
                         compiled.handlers = handlers;
+                        compiled.timers = timers;
                         compiled.ast = ast;
                         compiled.error = None;
                     }
@@ -266,6 +317,7 @@ impl Script {
     // Script by script, so each one's effects and each one's failure land on the
     // script that caused them.
     fn fire(&mut self, node: &str, canvas: &mut Canvas) {
+        self.at(now_secs());
         for name in self.scripts.keys().cloned().collect::<Vec<_>>() {
             let mut failed = None;
             {
@@ -287,6 +339,60 @@ impl Script {
                 compiled.error = failed.map_or(applied, Err).err();
             }
         }
+    }
+
+    // `true` when some timer's slot has rolled over. Asked without touching
+    // anything, which is what keeps the document alone on a quiet frame: the
+    // slot is recorded only once the handler has actually run.
+    fn due(&self, now: i64) -> bool {
+        self.scripts.values().any(|compiled| {
+            compiled
+                .timers
+                .iter()
+                .any(|timer| timer.slot(now) != timer.fired)
+        })
+    }
+
+    // Script by script, the same as `fire`: one script's timer failing is that
+    // script's error, and its effects land as one document change.
+    fn fire_due(&mut self, now: i64, canvas: &mut Canvas) {
+        for name in self.scripts.keys().cloned().collect::<Vec<_>>() {
+            let mut failed = None;
+            {
+                let Some(compiled) = self.scripts.get_mut(&name) else {
+                    continue;
+                };
+                let mut due = Vec::new();
+                for timer in &mut compiled.timers {
+                    let slot = timer.slot(now);
+                    if slot != timer.fired {
+                        timer.fired = slot;
+                        due.push((slot * timer.every, timer.handler.clone()));
+                    }
+                }
+                if due.is_empty() {
+                    continue;
+                }
+                let Some(compiled) = self.scripts.get(&name) else {
+                    continue;
+                };
+                for (at, handler) in due {
+                    self.at(at);
+                    if let Err(e) = handler.call::<()>(&self.engine, &compiled.ast, ()) {
+                        failed = Some(thrown(&e));
+                    }
+                }
+            }
+            let applied = self.apply(canvas);
+            if let Some(compiled) = self.scripts.get_mut(&name) {
+                compiled.error = failed.map_or(applied, Err).err();
+            }
+        }
+    }
+
+    // What `now()` answers until the next run sets it.
+    fn at(&self, when: i64) {
+        lock(&self.pending).at = when;
     }
 
     fn handles(&self, node: &str) -> bool {
@@ -321,6 +427,7 @@ impl Compiled {
         Self {
             ast: AST::empty(),
             handlers: HashMap::new(),
+            timers: Vec::new(),
             source: String::new(),
             error: None,
             dangling: Vec::new(),
@@ -359,6 +466,40 @@ fn engine(pending: &Arc<Mutex<Pending>>) -> Engine {
             .or_default()
             .push(handler);
     });
+
+    // A timer is this client's, not the board's: every open client runs its own,
+    // so a handler that writes should write the value they all agree on.
+    let cell = pending.clone();
+    engine.register_fn("every", move |secs: i64, handler: FnPtr| {
+        let every = secs.max(MIN_EVERY);
+        lock(&cell).timers.push(Tick {
+            every,
+            // The slot it registered in, so the first run is the next boundary
+            // rather than the moment the script compiled.
+            fired: now_secs().div_euclid(every),
+            handler,
+        });
+    });
+
+    // The instant this run is for, in local time so the board reads as the clock
+    // on the wall next to it. A bad format string is thrown rather than
+    // panicked: `DelayedFormat` reports it on write, and `to_string` would turn
+    // that into a panic.
+    let cell = pending.clone();
+    engine.register_fn(
+        "now",
+        move |format: &str| -> Result<String, Box<EvalAltResult>> {
+            use std::fmt::Write;
+            let at = lock(&cell).at;
+            let when = chrono::DateTime::from_timestamp(at, 0)
+                .ok_or_else(|| format!("now: {at} is not an instant"))?
+                .with_timezone(&chrono::Local);
+            let mut out = String::new();
+            write!(out, "{}", when.format(format))
+                .map(|()| out)
+                .map_err(|_| format!("now: {format:?} is not a time format").into())
+        },
+    );
 
     let cell = pending.clone();
     engine.register_fn("set_theme", move |name: &str| {
@@ -608,6 +749,30 @@ fn click(
         return;
     }
     script.fire(&node, &mut document.0);
+}
+
+// A timer fires unattended for as long as the board is open, so a tick that
+// changes nothing must not wake the document: every node and panel respawns
+// when it does. Two hashes beat that, and only on the frames something is due.
+fn tick(
+    mut script: ResMut<Script>,
+    mut document: ResMut<Document>,
+    mut ticked: ResMut<crate::sync::Ticked>,
+) {
+    let now = now_secs();
+    if !script.due(now) {
+        return;
+    }
+    let canvas = &mut document.bypass_change_detection().0;
+    let before = rev(canvas);
+    script.fire_due(now, canvas);
+    let after = rev(canvas);
+    if after == before {
+        return;
+    }
+    // Drawn, never saved: `sync` reads this to tell a clock from an edit.
+    ticked.wrote(&before, &after);
+    document.set_changed();
 }
 
 fn under(
@@ -1009,10 +1174,18 @@ fn list_body(
 
 // Everything a handler can reach, which is the whole of it: there is no tier
 // behind this list to hand someone else's script.
-const API: [(&str, &str); 6] = [
+const API: [(&str, &str); 8] = [
     (
         "on_click(id, || ...)",
         "run the body when that node is clicked",
+    ),
+    (
+        "every(secs, || ...)",
+        "on the wall clock, so every client fires together",
+    ),
+    (
+        "now(format)",
+        "the instant this run is for: \"%a %H:%M\" is \"Wed 14:32\"",
     ),
     ("set_theme(name)", "\"dark\" or \"light\""),
     ("move_node(id, x, y)", "top-left, in canvas coordinates"),
@@ -1028,7 +1201,11 @@ const API: [(&str, &str); 6] = [
 ];
 
 const API_NOTE: &str = "Right-click a node for its id. A handler reaches the \
-                        document and nothing else: no network, no files. It runs \
+                        document and nothing else: no network, no files. An \
+                        every() runs in every open client at the same instant, \
+                        and what it writes on its own is drawn but never saved \
+                        -- write a value every client can work out for itself. \
+                        It runs \
                         on the frame loop under an operation budget, so a runaway \
                         loop is an error here rather than a frozen window.";
 
@@ -1329,6 +1506,18 @@ mod tests {
         (script, canvas)
     }
 
+    // One run of the script's first timer, in the slot after the one it
+    // registered in. Anchored to that slot rather than to the clock, or a test
+    // that runs as the second rolls over would be a flake.
+    fn ticked(source: &str) -> (Script, Canvas) {
+        let (mut script, mut canvas) = scripted(source);
+        let timer = &script.scripts[MAIN].timers[0];
+        let at = (timer.fired + 1) * timer.every;
+        assert!(script.due(at), "the next slot is owed a run");
+        script.fire_due(at, &mut canvas);
+        (script, canvas)
+    }
+
     fn error(script: &Script, name: &str) -> Option<String> {
         script.scripts.get(name).and_then(|c| c.error.clone())
     }
@@ -1492,6 +1681,114 @@ mod tests {
         script.fire("n7", &mut canvas);
         let e = error(&script, MAIN).expect("the handler threw");
         assert!(e.contains("boom") && e.contains("line 2"), "{e}");
+    }
+
+    // Slots come off the wall clock, not off a per-client stopwatch: that is
+    // what makes two clients compute the same value at the same instant, so
+    // the first write lands and the rest change nothing.
+    #[test]
+    fn a_timer_runs_once_per_wall_clock_slot() {
+        let (mut script, mut canvas) = scripted(r#"every(60, || move_node("n7", 7, 7));"#);
+        let slot = script.scripts[MAIN].timers[0].fired;
+        assert_eq!(
+            (canvas.nodes[0].x, canvas.nodes[0].y),
+            (0, 0),
+            "registration is not a tick"
+        );
+        assert!(!script.due(slot * 60), "the slot it registered in");
+        assert!(!script.due(slot * 60 + 59), "still that slot");
+
+        let next = (slot + 1) * 60;
+        assert!(script.due(next));
+        script.fire_due(next, &mut canvas);
+        assert_eq!(error(&script, MAIN), None);
+        assert_eq!((canvas.nodes[0].x, canvas.nodes[0].y), (7, 7));
+        assert!(!script.due(next + 59), "and not twice in one slot");
+    }
+
+    // How a script derives a value from the slot it is running in, which is the
+    // only way an `every()` stays agreed across clients: `%s` is the epoch, so
+    // the parity flips once per slot and never depends on who opened what when.
+    #[test]
+    fn a_handler_can_read_the_slot_it_is_running_in() {
+        let source = concat!(
+            "every(5, || {\n",
+            "  if (parse_int(now(\"%s\")) / 5) % 2 == 0 {\n",
+            "    set_text(\"n7\", \"ping\");\n",
+            "  } else {\n",
+            "    set_text(\"n7\", \"pong\");\n",
+            "  }\n",
+            "});"
+        );
+        let (mut script, mut canvas) = scripted(source);
+        let timer = &script.scripts[MAIN].timers[0];
+        let (every, slot) = (timer.every, timer.fired);
+
+        // Two consecutive slots have to disagree, whichever one we start on.
+        let mut seen = Vec::new();
+        for step in 1..=2 {
+            script.fire_due((slot + step) * every, &mut canvas);
+            assert_eq!(error(&script, MAIN), None);
+            seen.push(
+                crate::text::markdown(&canvas.nodes[0])
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
+        }
+        seen.sort();
+        assert_eq!(seen, ["ping", "pong"], "the parity did not flip");
+    }
+
+    // Two clients, one board: they disagree about when they opened it and have
+    // to agree about when the timer fires.
+    #[test]
+    fn two_clients_land_on_the_same_slot() {
+        let (early, _) = scripted(r#"every(60, || set_theme("dark"));"#);
+        let (late, _) = scripted(r#"every(60, || set_theme("dark"));"#);
+        let at = now_secs() + 3600;
+        assert_eq!(
+            early.scripts[MAIN].timers[0].slot(at),
+            late.scripts[MAIN].timers[0].slot(at)
+        );
+    }
+
+    // `every(0, ..)` would write the document on every frame of the run.
+    #[test]
+    fn a_zero_interval_is_clamped_to_the_floor() {
+        let (script, _) = scripted(r#"every(0, || set_theme("dark"));"#);
+        assert_eq!(script.scripts[MAIN].timers[0].every, MIN_EVERY);
+    }
+
+    // The clock the board reads by. A format string nobody can parse is a
+    // script error with a line number, not a panic inside `DelayedFormat`.
+    #[test]
+    fn now_formats_the_local_clock_and_refuses_a_bad_format() {
+        let tick = |source| {
+            let (script, canvas) = ticked(source);
+            let text = crate::text::markdown(&canvas.nodes[0])
+                .unwrap_or_default()
+                .to_owned();
+            (error(&script, MAIN), text)
+        };
+
+        let (e, text) = tick(r#"every(1, || set_text("n7", now("%Y-%m-%d %H:%M")));"#);
+        assert_eq!(e, None);
+        assert_eq!(text.len(), 16, "{text:?}");
+        assert!(!text.contains('%'), "{text:?}");
+
+        // The kitchen-sink board's own format, `·` and all: chrono passes a
+        // literal through, and a board showing "%a" would be this missing.
+        // Not a raw string: the format is a markdown heading, so the source
+        // carries `"###` and no number of hashes can delimit it.
+        let (e, text) = tick("every(1, || set_text(\"n7\", now(\"### %a %d %b · %H:%M\")));");
+        assert_eq!(e, None);
+        assert!(text.starts_with("### ") && !text.contains('%'), "{text:?}");
+
+        let (e, _) = tick(r#"every(1, || set_text("n7", now("%Q")));"#);
+        assert!(
+            e.as_deref().unwrap_or_default().contains("time format"),
+            "{e:?}"
+        );
     }
 
     // The point of naming them: your typo in one script is not everyone else's
