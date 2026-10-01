@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::client::Document;
 use crate::edit::command;
+use crate::script;
 
 // Whole documents, which are kilobytes: fifty of them is cheaper than the code
 // an operation log would take to get right.
@@ -74,26 +75,36 @@ impl History {
     fn undo(&mut self, live: &Canvas) -> Option<Canvas> {
         let previous = self.past.pop_back()?;
         self.future.push(live.clone());
-        Some(self.adopt(previous))
+        Some(self.adopt(live, previous))
     }
 
     fn redo(&mut self, live: &Canvas) -> Option<Canvas> {
         let next = self.future.pop()?;
         self.past.push_back(live.clone());
-        Some(self.adopt(next))
+        Some(self.adopt(live, next))
     }
 
     // A step this stack took is not a change to record: adopting it as the
     // settled state is what keeps `record` from pushing it straight back.
-    fn adopt(&mut self, canvas: Canvas) -> Canvas {
-        self.seen = rev(&canvas);
+    fn adopt(&mut self, live: &Canvas, mut canvas: Canvas) -> Canvas {
+        // The scripts belong to the sidebar's history, so a step moves the
+        // canvas and leaves the buffers where the person left them.
+        script::carry_scripts(live, &mut canvas);
+        self.seen = step_rev(&canvas);
         self.current = Some(canvas.clone());
         canvas
     }
 }
 
+// The sidebar keeps the scripts' history (E6-T5), so this stack is blind to them:
+// a script edit is not a step back, and a step back is not a way to lose one.
+// A clone per check, which is kilobytes — `record` clones the document anyway.
+fn step_rev(canvas: &Canvas) -> String {
+    rev(&script::without_script(canvas))
+}
+
 fn record(time: Res<Time>, document: Res<Document>, mut history: ResMut<History>) {
-    let live = rev(&document.0);
+    let live = step_rev(&document.0);
     if !history.settled(time.elapsed_secs(), &live) {
         return;
     }
@@ -135,7 +146,7 @@ mod tests {
 
     // Each call is one finished gesture, the way `record` sees one.
     fn gesture(history: &mut History, canvas: Canvas) {
-        let at = rev(&canvas);
+        let at = step_rev(&canvas);
         history.commit(canvas, at);
     }
 
@@ -209,11 +220,11 @@ mod tests {
         // A drag: every check sees a different document.
         for step in 1..100 {
             now += CHECK.as_secs_f32();
-            assert!(!history.settled(now, &rev(&canvas(step))));
+            assert!(!history.settled(now, &step_rev(&canvas(step))));
         }
 
         // Let go, and the run becomes one step back.
-        let quiet = rev(&canvas(99));
+        let quiet = step_rev(&canvas(99));
         assert!(
             !history.settled(now, &quiet),
             "the first quiet check settles"
@@ -224,6 +235,29 @@ mod tests {
         assert_eq!(history.past.len(), 1);
     }
 
+    // The sidebar's stack is its own: typing Rhai is not a step this one takes,
+    // and a step it does take leaves every script where it was.
+    #[test]
+    fn the_script_is_not_part_of_a_canvas_step() {
+        let mut history = History::default();
+        let mut live = canvas(0);
+        gesture(&mut history, live.clone());
+
+        // A script edit settles into no new rev, so no step is ever recorded.
+        script::set_script(
+            &mut live,
+            "themes",
+            r#"on_click("n", || set_theme("dark"));"#,
+        );
+        assert_eq!(step_rev(&live), step_rev(&canvas(0)));
+
+        // And a step back keeps the script the sidebar is holding.
+        gesture(&mut history, canvas(1));
+        let back = history.undo(&live).expect("a step back");
+        assert_eq!(width(&back), 0);
+        assert!(script::script(&back, "themes").contains("on_click"));
+    }
+
     // An undo writes the document too, and that write is not a new step.
     #[test]
     fn a_step_this_stack_took_is_not_recorded_as_an_edit() {
@@ -232,7 +266,7 @@ mod tests {
         gesture(&mut history, canvas(1));
 
         let live = history.undo(&canvas(1)).expect("a step back");
-        let back = rev(&live);
+        let back = step_rev(&live);
         // However long it sits there, it stays one step back.
         assert!(!history.settled(0.0, &back));
         assert!(!history.settled(9.0, &back));

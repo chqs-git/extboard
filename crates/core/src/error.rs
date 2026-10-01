@@ -37,4 +37,7 @@ pub enum MutationError {
         width: i64,
         height: i64,
     },
+
+    #[error("{color} is not a canvas colour for node {node}: 1-6 or #rrggbb")]
+    InvalidColor { node: String, color: String },
 }

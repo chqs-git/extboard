@@ -100,7 +100,7 @@ pub(super) fn duplicate(
 
 // Offset by a grid step, so the copy is visibly its own node rather than exactly
 // over the original. Edges between the copies are not carried over.
-pub(super) fn duplicated(canvas: &mut Canvas, seed: u32, ids: &[&str]) -> Vec<String> {
+pub fn duplicated(canvas: &mut Canvas, seed: u32, ids: &[&str]) -> Vec<String> {
     let mut copies: Vec<_> = canvas
         .nodes
         .iter()

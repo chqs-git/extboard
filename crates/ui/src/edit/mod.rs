@@ -38,6 +38,8 @@ const REACH_DRAG: f32 = 224.0;
 
 mod keys;
 
+pub use keys::duplicated;
+
 pub use keys::command;
 
 pub struct EditPlugin;

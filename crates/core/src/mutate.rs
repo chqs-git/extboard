@@ -52,6 +52,20 @@ impl Canvas {
         Ok(())
     }
 
+    // `None` clears it, which puts the node back on the colour its kind gets.
+    pub fn set_color(&mut self, node_id: &str, color: Option<&str>) -> Result<(), MutationError> {
+        if let Some(color) = color
+            && !is_canvas_color(color)
+        {
+            return Err(MutationError::InvalidColor {
+                node: node_id.to_owned(),
+                color: color.to_owned(),
+            });
+        }
+        self.node_mut(node_id)?.color = color.map(str::to_owned);
+        Ok(())
+    }
+
     pub fn set_text(&mut self, node_id: &str, text: String) -> Result<(), MutationError> {
         match &mut self.node_mut(node_id)?.kind {
             NodeKind::Text { text: existing } => {
@@ -94,5 +108,15 @@ impl Canvas {
             .iter_mut()
             .find(|node| node.id == node_id)
             .ok_or_else(|| MutationError::NoSuchNode(node_id.to_owned()))
+    }
+}
+
+// The spec's colour field: one of Obsidian's six presets, or `#rrggbb`. Anything
+// else draws as no colour at all, so writing one is a silent no-op rather than
+// an edit \u{2014} which is the one thing a script must never look like.
+pub fn is_canvas_color(color: &str) -> bool {
+    match color.strip_prefix('#') {
+        Some(hex) => hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()),
+        None => matches!(color, "1" | "2" | "3" | "4" | "5" | "6"),
     }
 }

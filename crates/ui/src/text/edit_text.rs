@@ -16,10 +16,15 @@ use super::{BODY, CODE_BG, FG, markdown};
 // is one short line, and it stays legible at every zoom.
 const LABEL_BOX: Vec2 = Vec2::new(180.0, 28.0);
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Target {
     Node(String),
     Edge(String),
+    // One of the board's scripts, by name, in the sidebar. A target rather than a
+    // mode of its own, so everything that already stands down for a text node —
+    // the canvas undo stack included — stands down for it unchanged. It carries
+    // the name so a blur always writes back the script that was typed into.
+    Script(String),
 }
 
 #[derive(Resource, Default)]
@@ -155,6 +160,8 @@ pub(super) fn toggle(
     nodes: Query<(&NodeId, &Transform, &NodeRect)>,
     edges: Query<(&EdgeId, &Transform)>,
     editors: Query<&EditableText, With<Editor>>,
+    buffers: Query<&EditableText, With<crate::script::ScriptBuffer>>,
+    sidebar: Res<crate::script::Sidebar>,
     mut document: ResMut<Document>,
     mut editing: ResMut<Editing>,
     mut last: Local<Option<(f32, Vec2)>>,
@@ -178,9 +185,15 @@ pub(super) fn toggle(
         if !away && !keys.just_pressed(KeyCode::Escape) {
             return;
         }
+        // The sidebar's buffer is not a node's editor, and both can be alive at
+        // once: the panel outlives a blur.
+        let typed = match target {
+            Target::Script(_) => buffers.single(),
+            _ => editors.single(),
+        };
         // One document mutation per session, and only if something was typed:
         // waking the document respawns every node and panel.
-        if let Ok(editor) = editors.single()
+        if let Ok(editor) = typed
             && written_back(
                 &mut document.bypass_change_detection().0,
                 &target,
@@ -194,6 +207,13 @@ pub(super) fn toggle(
     }
 
     if !buttons.just_pressed(MouseButton::Left) || keys.pressed(KeyCode::Space) {
+        return;
+    }
+    // One click, because the panel is already open and asking to be typed in.
+    // Here rather than in `script.rs`: this runs before anything reads the
+    // press, so the click lands in the panel and not on the canvas under it.
+    if sidebar.takes_caret() && crate::script::in_sidebar(&window, window.cursor_position()) {
+        editing.0 = Some(Target::Script(sidebar.selected.clone()));
         return;
     }
     let (Some(world), Some(screen)) = (world, window.cursor_position()) else {
@@ -259,6 +279,7 @@ fn holds(
             };
             ((cursor - at).abs() * 2.0).cmple(LABEL_BOX).all()
         }
+        Target::Script(_) => crate::script::in_sidebar(window, window.cursor_position()),
     }
 }
 
@@ -296,5 +317,6 @@ pub(super) fn written_back(canvas: &mut Canvas, target: &Target, text: &str) -> 
             edge.label = want;
             true
         }
+        Target::Script(name) => crate::script::set_script(canvas, name, text),
     }
 }
