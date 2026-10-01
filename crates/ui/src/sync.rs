@@ -26,6 +26,37 @@ enum Reply {
 
 type Inbox = Arc<Mutex<Vec<Reply>>>;
 
+// A change no human made. Every client computes a timer's value from the same
+// slot, so saving it would be N clients racing to write what they already
+// agree on -- and the loser of that race is whoever is mid-edit, because an
+// edit in progress is the one save being held back by the debounce. So a
+// document that departs from the server's by tick writes alone is not saved,
+// and the value lives in the open clients rather than in the file.
+#[derive(Resource, Default)]
+pub struct Ticked {
+    // The rev before the first tick write that is still unsaved.
+    clean: String,
+    // The rev after the last one, so an edit on top of it is detectable.
+    after: String,
+}
+
+impl Ticked {
+    // Called by `script::tick` with the revs either side of its write.
+    pub fn wrote(&mut self, before: &str, after: &str) {
+        // A write that did not land on the last one starts the run again: the
+        // document moved in between, and that move is somebody's edit.
+        if self.after != before {
+            self.clean = before.to_owned();
+        }
+        self.after = after.to_owned();
+    }
+
+    // `true` when the document differs from the server by tick writes alone.
+    fn only(&self, local: &str, base: &str) -> bool {
+        !self.after.is_empty() && self.after == local && self.clean == base
+    }
+}
+
 #[derive(Resource)]
 struct Save {
     inbox: Inbox,
@@ -53,12 +84,14 @@ impl Default for Save {
 
 impl Plugin for SyncPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Save>().add_systems(
-            Update,
-            (adopt, send.run_if(on_timer(CHECK)))
-                .chain()
-                .run_if(resource_exists::<Document>),
-        );
+        app.init_resource::<Save>()
+            .init_resource::<Ticked>()
+            .add_systems(
+                Update,
+                (adopt, send.run_if(on_timer(CHECK)))
+                    .chain()
+                    .run_if(resource_exists::<Document>),
+            );
     }
 }
 
@@ -77,13 +110,24 @@ impl Save {
     }
 }
 
-fn send(time: Res<Time>, document: Res<Document>, base: Res<Rev>, mut save: ResMut<Save>) {
+fn send(
+    time: Res<Time>,
+    document: Res<Document>,
+    base: Res<Rev>,
+    ticked: Res<Ticked>,
+    mut save: ResMut<Save>,
+) {
     // Without a rev there is nothing to compare and swap against, so the first
     // load has to land before the first save.
     if base.0.is_empty() {
         return;
     }
     let local = rev(&document.0);
+    // Checked before `due`, so a clock ticking away never counts as a gesture
+    // that has settled and never holds up the save of a real edit.
+    if ticked.only(&local, &base.0) {
+        return;
+    }
     if !save.due(time.elapsed_secs(), &local, &base.0) {
         return;
     }
@@ -113,11 +157,16 @@ fn adopt(
             // dropped edit is said out loud rather than replayed. A handler's
             // write is no different: the lambda already ran, and re-running it
             // would double whatever else it did, so the click is lost too.
-            Reply::Conflict(canvas, rev) => {
+            Reply::Conflict(canvas, etag) => {
+                let lost = dropped(&document.0, &canvas);
                 document.0 = canvas;
-                base.0 = rev;
+                base.0 = etag;
                 save.backoff = BACKOFF_MIN;
-                notice.0 = Some(DROPPED.to_owned());
+                if lost {
+                    notice.0 = Some(DROPPED.to_owned());
+                } else {
+                    clear(&mut notice);
+                }
             }
             Reply::Failed(message) => {
                 error!("{message}");
@@ -127,6 +176,13 @@ fn adopt(
             }
         }
     }
+}
+
+// A timer fires in every open client at once, so the clients that lose the race
+// get a 409 carrying the document they already hold. Nothing was dropped, and
+// saying so every minute would be the clock crying wolf.
+fn dropped(ours: &Canvas, theirs: &Canvas) -> bool {
+    rev(ours) != rev(theirs)
 }
 
 fn clear(notice: &mut ResMut<Notice>) {
@@ -270,6 +326,49 @@ mod tests {
         let mut save = Save::default();
         save.due(0.0, "same", "same");
         assert!(!save.due(9.0, "same", "same"));
+    }
+
+    // A timer's write stays in the open clients: the file is not where a value
+    // every client can compute for itself belongs, and saving it is what put
+    // the person mid-edit on the losing side of a conflict.
+    #[test]
+    fn a_tick_only_change_is_not_saved() {
+        let mut ticked = Ticked::default();
+        assert!(!ticked.only("local", "base"), "nothing has ticked yet");
+
+        // One tick, taking the document from the server's version to r1.
+        ticked.wrote("base", "r1");
+        assert!(ticked.only("r1", "base"));
+
+        // The next slot, landing on the first: still nothing but ticks.
+        ticked.wrote("r1", "r2");
+        assert!(ticked.only("r2", "base"));
+
+        // The person types. The document is no longer what the tick left.
+        assert!(!ticked.only("r3", "base"));
+        // And a tick on top of that edit does not make the edit unsavable.
+        ticked.wrote("r3", "r4");
+        assert!(!ticked.only("r4", "base"));
+
+        // A remote change moved the server on, so ours is a real difference.
+        ticked.wrote("base", "r5");
+        assert!(!ticked.only("r5", "r9"));
+    }
+
+    // The clock on two tabs: the loser's 409 body is what it already holds.
+    #[test]
+    fn a_conflict_that_changes_nothing_is_not_a_dropped_edit() {
+        let canvas: Canvas = serde_json::from_str(
+            r#"{"nodes":[{"id":"n7","type":"text","x":0,"y":0,"width":9,"height":9,"text":"14:32"}],"edges":[]}"#,
+        )
+        .expect("fixture");
+        assert!(!dropped(&canvas, &canvas.clone()));
+
+        let mut theirs = canvas.clone();
+        theirs
+            .set_text("n7", "14:33".to_owned())
+            .expect("a text node");
+        assert!(dropped(&canvas, &theirs));
     }
 
     #[test]
