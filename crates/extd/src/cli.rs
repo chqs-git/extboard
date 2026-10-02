@@ -25,6 +25,11 @@ pub enum Command {
         dist: PathBuf,
     },
 
+    // Print the LLM view of a .canvas file on stdout.
+    Project {
+        file: PathBuf,
+    },
+
     // Parse, validate and rewrite a .canvas file in our format.
     Fmt {
         file: PathBuf,
@@ -35,10 +40,13 @@ pub enum Command {
     },
 }
 
+pub fn project(file: &Path) -> Result<(), Box<dyn Error>> {
+    print!("{}", crate::project::render(&load(file)?.1));
+    Ok(())
+}
+
 pub fn fmt(file: &Path, check: bool) -> Result<(), Box<dyn Error>> {
-    let source = fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
-    let canvas: Canvas =
-        serde_json::from_str(&source).map_err(|e| format!("{}: {e}", file.display()))?;
+    let (source, canvas) = load(file)?;
 
     if let Err(errors) = validate(&canvas) {
         for error in &errors {
@@ -55,6 +63,13 @@ pub fn fmt(file: &Path, check: bool) -> Result<(), Box<dyn Error>> {
         return Err(format!("{}: not formatted", file.display()).into());
     }
     Ok(fs::write(file, formatted)?)
+}
+
+// The file's own bytes come back too, because `fmt` compares against them.
+fn load(file: &Path) -> Result<(String, Canvas), Box<dyn Error>> {
+    let source = fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let canvas = serde_json::from_str(&source).map_err(|e| format!("{}: {e}", file.display()))?;
+    Ok((source, canvas))
 }
 
 #[cfg(test)]
