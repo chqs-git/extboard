@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use extboard_core::{Canvas, validate};
 use std::error::Error;
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -30,6 +31,11 @@ pub enum Command {
         file: PathBuf,
     },
 
+    // Read a projection on stdin and write it back over a .canvas file.
+    Unproject {
+        file: PathBuf,
+    },
+
     // Parse, validate and rewrite a .canvas file in our format.
     Fmt {
         file: PathBuf,
@@ -43,6 +49,17 @@ pub enum Command {
 pub fn project(file: &Path) -> Result<(), Box<dyn Error>> {
     print!("{}", crate::project::render(&load(file)?.1));
     Ok(())
+}
+
+pub fn unproject(file: &Path) -> Result<(), Box<dyn Error>> {
+    let mut projected = String::new();
+    io::stdin().read_to_string(&mut projected)?;
+
+    let (_, original) = load(file)?;
+    let canvas = crate::project::unproject(&projected, &original)
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+
+    Ok(fs::write(file, canvas.to_pretty_string())?)
 }
 
 pub fn fmt(file: &Path, check: bool) -> Result<(), Box<dyn Error>> {
