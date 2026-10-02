@@ -1,4 +1,4 @@
-use extboard_core::{Canvas, Edge, Node, NodeKind, Side};
+use extboard_core::{Canvas, Edge, Node, NodeKind, Side, validate};
 use serde_json::Value;
 
 pub const CELL: i64 = 20;
@@ -125,6 +125,193 @@ fn script_names(canvas: &Canvas) -> Vec<String> {
     }
 }
 
+pub fn unproject(projected: &str, original: &Canvas) -> Result<Canvas, String> {
+    let mut canvas = Canvas {
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        extra: original.extra.clone(),
+    };
+
+    for (number, line) in projected.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let at = |e: String| format!("line {}: {e}", number + 1);
+        match line.split_whitespace().next() {
+            Some("grid") => grid(line).map_err(at)?,
+            Some("script") => {}
+            Some("edge") => canvas.edges.push(edge(line, original).map_err(at)?),
+            Some(_) => canvas.nodes.push(node(line, original).map_err(at)?),
+            None => {}
+        }
+    }
+
+    validate(&canvas).map_err(|errors| {
+        errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+
+    Ok(canvas)
+}
+
+pub fn units(cells: i64) -> i64 {
+    cells * CELL
+}
+
+// The grid is fixed, so a header naming another one is a projection from a
+// different reference frame and nothing here can place it.
+fn grid(line: &str) -> Result<(), String> {
+    match line.split_whitespace().nth(1).map(str::parse::<i64>) {
+        Some(Ok(CELL)) => Ok(()),
+        _ => Err(format!("grid must be {CELL}: {line}")),
+    }
+}
+
+fn node(line: &str, original: &Canvas) -> Result<Node, String> {
+    let (head, payload) = split_payload(line);
+    let mut words = head.split_whitespace();
+    let (Some(kind), Some(id), Some(at), Some(size)) =
+        (words.next(), words.next(), words.next(), words.next())
+    else {
+        return Err(format!("not a node: {head}"));
+    };
+
+    let (x, y) = pair(at.strip_prefix('@').unwrap_or(at), ',', "@col,row")?;
+    let (width, height) = pair(size, 'x', "WxH")?;
+
+    let was = original.nodes.iter().find(|node| node.id == id);
+    let kind = kind_of(kind, &payload, was)?;
+
+    Ok(Node {
+        id: id.to_owned(),
+        x: units(x),
+        y: units(y),
+        width: units(width),
+        height: units(height),
+        color: words
+            .next()
+            .and_then(|word| word.strip_prefix("c="))
+            .map(str::to_owned),
+        kind,
+        extra: was.map(|node| node.extra.clone()).unwrap_or_default(),
+    })
+}
+
+// An untouched payload keeps the node it came from, which is how a file node's
+// `subpath` and a text node's exact bytes survive the trip.
+fn kind_of(kind: &str, payload: &str, was: Option<&Node>) -> Result<NodeKind, String> {
+    if let Some(node) = was
+        && kind_name(&node.kind) == kind
+        && self::payload(&node.kind) == payload
+    {
+        return Ok(node.kind.clone());
+    }
+    match kind {
+        "text" => Ok(NodeKind::Text {
+            text: payload.to_owned(),
+        }),
+        "file" => {
+            let (file, subpath) = match payload.split_once('#') {
+                Some((file, subpath)) => (file.to_owned(), Some(format!("#{subpath}"))),
+                None => (payload.to_owned(), None),
+            };
+            Ok(NodeKind::File { file, subpath })
+        }
+        "link" => Ok(NodeKind::Link {
+            url: payload.to_owned(),
+        }),
+        "group" => Ok(NodeKind::Group {
+            label: (!payload.is_empty()).then(|| payload.to_owned()),
+        }),
+        other => Err(format!("{other} is not a node type")),
+    }
+}
+
+fn edge(line: &str, original: &Canvas) -> Result<Edge, String> {
+    let (head, label) = split_payload(line);
+    let mut words = head.split_whitespace();
+    let (Some(_), Some(id), Some(from), Some("->"), Some(to)) = (
+        words.next(),
+        words.next(),
+        words.next(),
+        words.next(),
+        words.next(),
+    ) else {
+        return Err(format!("not an edge: {head}"));
+    };
+
+    let (from_node, from_side) = endpoint(from)?;
+    let (to_node, to_side) = endpoint(to)?;
+    let was = original.edges.iter().find(|edge| edge.id == id);
+
+    Ok(Edge {
+        id: id.to_owned(),
+        from_node,
+        from_side,
+        from_end: was.and_then(|edge| edge.from_end),
+        to_node,
+        to_side,
+        to_end: was.and_then(|edge| edge.to_end),
+        label: (!label.is_empty()).then(|| label.clone()),
+        extra: was.map(|edge| edge.extra.clone()).unwrap_or_default(),
+    })
+}
+
+fn endpoint(word: &str) -> Result<(String, Option<Side>), String> {
+    let Some((id, side)) = word.split_once(':') else {
+        return Ok((word.to_owned(), None));
+    };
+    let side = match side {
+        "top" => Side::Top,
+        "right" => Side::Right,
+        "bottom" => Side::Bottom,
+        "left" => Side::Left,
+        other => return Err(format!("{other} is not a side")),
+    };
+    Ok((id.to_owned(), Some(side)))
+}
+
+// The payload runs to the end of the line, so only the first separator counts.
+fn split_payload(line: &str) -> (&str, String) {
+    match line.split_once(" | ") {
+        Some((head, payload)) => (head, unescape(payload)),
+        None => (line, String::new()),
+    }
+}
+
+fn pair(word: &str, between: char, shape: &str) -> Result<(i64, i64), String> {
+    let parsed = word
+        .split_once(between)
+        .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)));
+    parsed.ok_or_else(|| format!("{word} is not {shape}"))
+}
+
+fn unescape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,6 +366,89 @@ mod tests {
         let projected = render(&canvas);
         assert!(projected.contains("script main <kept>"), "{projected}");
         assert!(!projected.contains("on_click"), "{projected}");
+    }
+
+    // Quantisation is lossy by design, so the invariant is "quantised equals
+    // quantised", never "equals the original".
+    #[test]
+    fn a_round_trip_through_the_grid_settles() {
+        let original = canvas();
+        let projected = render(&original);
+        let back = unproject(&projected, &original).unwrap();
+
+        assert_eq!(render(&back), projected);
+        assert_eq!(back.nodes.len(), original.nodes.len());
+        assert_eq!(
+            render(&unproject(&render(&back), &back).unwrap()),
+            projected
+        );
+    }
+
+    #[test]
+    fn the_script_and_the_extras_come_back() {
+        let mut original = canvas();
+        original.extra.insert(
+            "extboard".to_owned(),
+            serde_json::json!({"scripts": {"main": "fn on_click(id) { 1 }"}}),
+        );
+        original.nodes[0]
+            .extra
+            .insert("mine".to_owned(), serde_json::json!(7));
+        original.edges[0].to_end = Some(extboard_core::End::None);
+
+        let back = unproject(&render(&original), &original).unwrap();
+
+        assert_eq!(back.extra, original.extra);
+        let node = back
+            .nodes
+            .iter()
+            .find(|node| node.id == original.nodes[0].id)
+            .unwrap();
+        assert_eq!(node.extra.get("mine"), Some(&serde_json::json!(7)));
+        assert_eq!(back.edges[0].to_end, Some(extboard_core::End::None));
+    }
+
+    #[test]
+    fn an_invented_id_is_rejected_by_id() {
+        let original = canvas();
+        let mut projected = render(&original);
+        projected.push_str("edge e9 nope -> alsonope\n");
+
+        let error = unproject(&projected, &original).unwrap_err();
+        assert!(error.contains("nope"), "{error}");
+        assert!(error.contains("does not exist"), "{error}");
+    }
+
+    #[test]
+    fn a_broken_line_names_its_number() {
+        let original = canvas();
+
+        for (line, expected) in [
+            ("grid 7", "grid must be 20"),
+            ("text n1 @zero,0 2x2", "is not @col,row"),
+            ("blob n1 @0,0 2x2", "is not a node type"),
+            ("edge e1 a -> b:sideways", "is not a side"),
+        ] {
+            let error = unproject(&format!("grid 20\n{line}\n"), &original).unwrap_err();
+            assert!(error.starts_with("line 2:"), "{line}: {error}");
+            assert!(error.contains(expected), "{line}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_newline_in_a_text_node_survives() {
+        let mut original = canvas();
+        original.nodes[1].kind = NodeKind::Text {
+            text: "## Day 1\n\na back\\slash and a | pipe".to_owned(),
+        };
+
+        let back = unproject(&render(&original), &original).unwrap();
+        let node = back
+            .nodes
+            .iter()
+            .find(|node| node.id == original.nodes[1].id)
+            .unwrap();
+        assert_eq!(node.kind, original.nodes[1].kind);
     }
 
     // The point of the whole exercise: a board worth reading, cheaply. Real
