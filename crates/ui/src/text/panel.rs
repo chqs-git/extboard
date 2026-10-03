@@ -10,7 +10,7 @@ use crate::shape::{Palette, PolygonMaterial, paint};
 use crate::theme::Theme;
 
 use super::edit_text::{Editing, editor, label_editor};
-use super::{GROUP_SIZE, PADDING, ROW_GAP, Raster, blocks, markdown, spawn_blocks, wrap};
+use super::{GROUP_SIZE, PADDING, ROW_GAP, Raster, blocks, justify, markdown, spawn_blocks, wrap};
 
 const OUTLINE_PX: f32 = 2.0;
 
@@ -117,7 +117,14 @@ fn inside(
         (_, Some(md)) if open => {
             parent.spawn(editor(md, face.ink, raster));
         }
-        (_, Some(md)) => spawn_blocks(&blocks(md), theme, &face, raster, parent),
+        (_, Some(md)) => spawn_blocks(
+            &blocks(md),
+            theme,
+            &face,
+            raster,
+            justify(&node.extra),
+            parent,
+        ),
         // The file is a path in the spaces dir, which is the asset root.
         (NodeKind::File { file, .. }, _) if is_image(file) => {
             parent.spawn((
@@ -137,7 +144,7 @@ fn inside(
                     ..TextFont::from_font_size(GROUP_SIZE * raster)
                 },
                 TextColor(face.ink),
-                wrap(),
+                wrap(bevy::text::Justify::Left),
             ));
         }
         _ => {}

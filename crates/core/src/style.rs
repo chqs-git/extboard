@@ -87,6 +87,26 @@ pub fn set_font_role(extra: &mut Map<String, Value>, role: Option<usize>) {
     };
 }
 
+// How a line sits in the node: left, centred, or right. Left is written as no
+// key, since every text node drew that way before this existed.
+pub const ALIGNS: [&str; 3] = ["left", "center", "right"];
+pub const LEFT_ALIGN: usize = 0;
+
+pub fn align(extra: &Map<String, Value>) -> Option<usize> {
+    let name = extra.get("textAlign")?.as_str()?;
+    ALIGNS.iter().position(|align| *align == name)
+}
+
+pub fn set_align(extra: &mut Map<String, Value>, align: Option<usize>) {
+    match align
+        .filter(|align| *align != LEFT_ALIGN)
+        .and_then(|align| ALIGNS.get(align))
+    {
+        Some(name) => extra.insert("textAlign".to_owned(), Value::from(*name)),
+        None => extra.remove("textAlign"),
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +180,22 @@ mod tests {
         set_text_color(&mut extra, Some("5"));
         assert_eq!(extra.get("text").and_then(Value::as_str), Some("# hello"));
         assert_eq!(text_color(&extra), Some("5"));
+    }
+
+    #[test]
+    fn left_is_no_key_and_the_other_two_round_trip() {
+        let mut extra = Map::new();
+        assert_eq!(align(&extra), None);
+
+        set_align(&mut extra, Some(2));
+        assert_eq!(
+            extra.get("textAlign").and_then(Value::as_str),
+            Some("right")
+        );
+        assert_eq!(align(&extra), Some(2));
+
+        set_align(&mut extra, Some(LEFT_ALIGN));
+        assert!(extra.is_empty(), "{extra:?}");
+        assert_eq!(align(&with("textAlign", Value::from("sideways"))), None);
     }
 }

@@ -17,7 +17,7 @@ pub use model::{
 };
 pub use mutate::is_canvas_color;
 pub use rev::{fresh_id, rev};
-pub use style::{MID_STROKE, STROKES, stroke_scale, stroke_width};
+pub use style::{LEFT_ALIGN, MID_STROKE, STROKES, align, stroke_scale, stroke_width};
 pub use theme::{
     ACCENT, BACKGROUND, DEFAULT_FONT, FONT_ROLES, Fonts, MAX_COLORS, MIN_COLORS, PRESETS, PRIMARY,
     PRIMARY_TEXT, ROLES, SECONDARY, TEXT, Theme,

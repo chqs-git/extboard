@@ -1,6 +1,6 @@
 use bevy::input_focus::{FocusCause, InputFocus};
 use bevy::prelude::*;
-use bevy::text::{EditableText, TextCursorStyle, TextEdit};
+use bevy::text::{EditableText, Justify, TextCursorStyle, TextEdit};
 use bevy::ui::widget::TextScroll;
 use extboard_core::{Canvas, object_mut, rev};
 use rhai::{AST, Engine, EvalAltResult, FnPtr};
@@ -1199,13 +1199,13 @@ fn help_body(parent: &mut ChildSpawnerCommands) {
                             Text::new(signature),
                             TextFont::from_font_size(CODE_SIZE),
                             TextColor(STRING),
-                            wrap(),
+                            wrap(Justify::Left),
                         ));
                         parent.spawn((
                             Text::new(means),
                             TextFont::from_font_size(LABEL_SIZE),
                             TextColor(LABEL),
-                            wrap(),
+                            wrap(Justify::Left),
                         ));
                     });
             }
@@ -1213,7 +1213,7 @@ fn help_body(parent: &mut ChildSpawnerCommands) {
                 Text::new(API_NOTE),
                 TextFont::from_font_size(LABEL_SIZE),
                 TextColor(COMMENT),
-                wrap(),
+                wrap(Justify::Left),
             ));
         });
 }
@@ -1286,7 +1286,7 @@ fn status_line() -> impl Bundle {
         Text::new(String::new()),
         TextFont::from_font_size(LABEL_SIZE),
         TextColor(LABEL),
-        wrap(),
+        wrap(Justify::Left),
     )
 }
 
@@ -1308,7 +1308,7 @@ fn overlay() -> impl Bundle {
         Text::new(String::new()),
         TextFont::from_font_size(CODE_SIZE),
         TextColor(PANEL_FG),
-        wrap(),
+        wrap(Justify::Left),
     )
 }
 
@@ -1337,7 +1337,7 @@ fn buffer(script: &str) -> impl Bundle {
             ..default()
         },
         text,
-        wrap(),
+        wrap(Justify::Left),
         TextFont::from_font_size(CODE_SIZE),
         TextColor(Color::NONE),
         // The default caret is slate, which on this panel is invisible.
