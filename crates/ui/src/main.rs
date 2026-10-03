@@ -3,6 +3,7 @@ mod client;
 mod dropdown_menu;
 mod edit;
 mod hud;
+mod icon;
 mod node;
 mod scene;
 mod script;
@@ -12,6 +13,7 @@ mod spaces;
 mod sync;
 mod text;
 mod theme;
+mod tip;
 mod undo;
 #[cfg(test)]
 mod wgsl;
@@ -62,7 +64,8 @@ fn main() {
             sync::SyncPlugin,
             text::TextPlugin,
             theme::ThemePlugin,
-            undo::UndoPlugin,
+            // Nested: `Plugins` is implemented up to a tuple of fifteen.
+            (icon::IconPlugin, tip::TipPlugin, undo::UndoPlugin),
         ))
         .run();
 }

@@ -1,5 +1,5 @@
 use super::edit_text::written_back;
-use super::panel::{back_to_front, centre_scale_offset};
+use super::panel::centre_scale_offset;
 use super::*;
 use extboard_core::{Canvas, Edge};
 
@@ -174,40 +174,6 @@ fn list_items_are_one_line_each_with_a_bullet() {
     assert_eq!(got.len(), 2);
     assert_eq!(line(&got, 0)[0].text, "- ");
     assert_eq!(line(&got, 1).last().unwrap().text, "bold");
-}
-
-fn sized(id: &str, width: i64, kind: NodeKind) -> CanvasNode {
-    CanvasNode {
-        id: id.to_owned(),
-        x: 0,
-        y: 0,
-        width,
-        height: width,
-        color: None,
-        sides: None,
-        kind,
-        extra: default(),
-    }
-}
-
-// The bug this fixes: a panel is UI, and UI is drawn after the whole 2D world,
-// so nothing but another panel can ever cover one.
-#[test]
-fn panels_are_ordered_back_to_front_by_area() {
-    let text = || NodeKind::Text {
-        text: String::new(),
-    };
-    let nodes = [
-        sized("small", 100, text()),
-        sized("group", 900, NodeKind::Group { label: None }),
-        sized("medium", 300, text()),
-    ];
-
-    let order: Vec<&str> = back_to_front(&nodes)
-        .iter()
-        .map(|node| node.id.as_str())
-        .collect();
-    assert_eq!(order, ["group", "medium", "small"]);
 }
 
 // Every run on a node comes out of the palette: a link and a code span take the

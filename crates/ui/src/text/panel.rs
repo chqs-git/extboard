@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::camera::world_to_screen;
 use crate::client::Document;
-use crate::node::{NodeId, NodeRect, depth};
+use crate::node::{NodeId, NodeRect};
 use crate::select::{OUTLINE, Selected};
 use crate::shape::{Palette, PolygonMaterial, paint};
 use crate::theme::Theme;
@@ -45,7 +45,8 @@ pub(super) fn spawn_panels(
     }
 
     let raster = raster.0;
-    for (rank, node) in back_to_front(&document.0.nodes).iter().enumerate() {
+    // Array order is already back to front, so the index is the rank.
+    for (rank, node) in document.0.nodes.iter().enumerate() {
         let size = Vec2::new(node.width as f32, node.height as f32);
         // The content is laid out `raster` times too big and scaled back down by
         // the same factor, so its glyphs are rasterized at that resolution.
@@ -88,14 +89,6 @@ pub(super) fn spawn_panels(
                     });
             });
     }
-}
-
-// The same area-based depth the node entities carry, as a `ZIndex` rank: spawn
-// order would do it too, but not visibly.
-pub(super) fn back_to_front(nodes: &[CanvasNode]) -> Vec<&CanvasNode> {
-    let mut order: Vec<&CanvasNode> = nodes.iter().collect();
-    order.sort_by(|a, b| depth(a).total_cmp(&depth(b)));
-    order
 }
 
 fn inside(

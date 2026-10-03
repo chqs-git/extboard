@@ -12,6 +12,8 @@ use extboard_core::{
 use serde_json::{Map, Value};
 
 use crate::client::Document;
+use crate::edit::{Depth, restacked};
+use crate::icon::Icons;
 use crate::node::NodeId;
 use crate::scene::EdgeId;
 use crate::select::{PanelRoot, Selected};
@@ -19,6 +21,7 @@ use crate::theme::{
     FG, FIELD_BG, LABEL, LABEL_SIZE, PAD, PANEL_BG, ROW, TOP, Theme, code, editable, field_box,
     heading, list, row, row_bg, set_text, tag,
 };
+use crate::tip::Tip;
 
 use super::{Sides, set_sides};
 
@@ -101,6 +104,9 @@ struct Weight(u8);
 #[derive(Component)]
 struct Align(usize);
 
+#[derive(Component)]
+struct Restack(Depth);
+
 // A row of an open list: a palette slot, or none of them.
 #[derive(Component)]
 struct Slot(Option<usize>);
@@ -124,6 +130,7 @@ pub(super) fn sync(
     theme: Res<Theme>,
     opened: Res<Opened>,
     focus: Res<InputFocus>,
+    icons: Res<Icons>,
     nodes: Query<&NodeId, With<Selected>>,
     edges: Query<&EdgeId, With<Selected>>,
     panels: Query<(Entity, &ConfigPanel)>,
@@ -136,10 +143,10 @@ pub(super) fn sync(
     let open = panels.single().ok();
     match (want, open) {
         (None, Some((entity, _))) => commands.entity(entity).despawn(),
-        (Some(want), None) => spawn(&mut commands, &theme, want),
+        (Some(want), None) => spawn(&mut commands, &theme, &icons, want),
         (Some(want), Some((entity, panel))) if *panel != want.panel => {
             commands.entity(entity).despawn();
-            spawn(&mut commands, &theme, want);
+            spawn(&mut commands, &theme, &icons, want);
         }
         (Some(want), Some(_)) => {
             let Some(sides) = want.sides else {
@@ -236,7 +243,7 @@ pub(super) fn shown(
     })
 }
 
-fn spawn(commands: &mut Commands, theme: &Theme, want: Shown) {
+fn spawn(commands: &mut Commands, theme: &Theme, icons: &Icons, want: Shown) {
     let Shown { panel, sides } = want;
     let node = matches!(panel.target, Target::Node(_));
     let (outline, text) = (panel.outline.clone(), panel.text.clone());
@@ -277,6 +284,11 @@ fn spawn(commands: &mut Commands, theme: &Theme, want: Shown) {
                 labelled(parent, "align", |parent| {
                     for align in 0..ALIGN_LABELS.len() {
                         align_button(parent, align, align == picked);
+                    }
+                });
+                labelled(parent, "depth", |parent| {
+                    for (step, icon, name) in DEPTH_STEPS {
+                        depth_button(parent, icons, step, icon, name);
                     }
                 });
             }
@@ -461,6 +473,54 @@ fn align_button(parent: &mut ChildSpawnerCommands, align: usize, on: bool) {
             children![tag(ALIGN_LABELS[align], if on { FG } else { LABEL })],
         ))
         .observe(pick_align);
+}
+
+// Back to front, left to right, so the row reads the way the stack does. The
+// name is both the icon's file and its tip: an icon is only ever as clear as
+// the word behind it.
+const DEPTH_STEPS: [(Depth, &str, &str); 4] = [
+    (Depth::Back, "send_to_back", "send to back"),
+    (Depth::Behind, "send_backward", "send backward"),
+    (Depth::Ahead, "send_forward", "send forward"),
+    (Depth::Front, "send_to_top", "send to top"),
+];
+
+// Square, the height of every other control in the panel so the row lines up.
+const GLYPH: f32 = 14.0;
+
+fn depth_button(
+    parent: &mut ChildSpawnerCommands,
+    icons: &Icons,
+    step: Depth,
+    icon: &str,
+    name: &'static str,
+) {
+    parent
+        .spawn((
+            Restack(step),
+            Tip(name),
+            Node {
+                width: px(ROW),
+                height: px(ROW),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border_radius: BorderRadius::all(px(3.0)),
+                ..default()
+            },
+            BackgroundColor(FIELD_BG),
+            children![(
+                // The icon is flat grey, so the tint is what colours it.
+                ImageNode::new(icons.get(icon)).with_color(FG),
+                Node {
+                    width: px(GLYPH),
+                    height: px(GLYPH),
+                    ..default()
+                },
+                // Or the glyph eats the press meant for the button under it.
+                Pickable::IGNORE,
+            )],
+        ))
+        .observe(press_depth);
 }
 
 // The open list: the palette by role, or the three texts.
@@ -650,6 +710,22 @@ fn pick_align(
     };
     if let Some(extra) = extras(&mut document.0, &panel.target) {
         style::set_align(extra, Some(button.0));
+    }
+}
+
+// Not bypassed, unlike the sides drag: the node panels take their stacking
+// order at spawn, so the respawn is the point of the write.
+fn press_depth(
+    press: On<Pointer<Press>>,
+    buttons: Query<&Restack>,
+    panels: Query<&ConfigPanel>,
+    mut document: ResMut<Document>,
+) {
+    let (Ok(button), Ok(panel)) = (buttons.get(press.entity), panels.single()) else {
+        return;
+    };
+    if let Target::Node(id) = &panel.target {
+        restacked(&mut document.0, id, button.0);
     }
 }
 

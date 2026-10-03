@@ -351,9 +351,11 @@ mod tests {
 
     #[test]
     fn pick_takes_the_front_of_the_overlap_and_nothing_outside() {
-        // A small card sitting on a big group: same point, the card wins.
-        let group = (0usize, rect(0.0, 400.0), -0.16);
-        let card = (1usize, rect(0.0, 100.0), -0.01);
+        // A card over a group, which is to say later in the array: the card
+        // takes the click, whichever order they are offered in.
+        let depth = |index| crate::node::depth(index, 2);
+        let group = (0usize, rect(0.0, 400.0), depth(0));
+        let card = (1usize, rect(0.0, 100.0), depth(1));
         assert_eq!(pick([group, card].into_iter(), Vec2::ZERO), Some(1));
         assert_eq!(pick([card, group].into_iter(), Vec2::ZERO), Some(1));
         // Outside the card, only the group is under the cursor.
