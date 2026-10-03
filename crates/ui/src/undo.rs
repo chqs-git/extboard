@@ -4,7 +4,7 @@ use extboard_core::{Canvas, rev};
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use crate::client::Document;
+use crate::client::{Document, Space};
 use crate::edit::command;
 use crate::script;
 
@@ -37,13 +37,19 @@ impl Plugin for UndoPlugin {
         app.init_resource::<History>().add_systems(
             Update,
             (
-                // Typing owns the keyboard, and the buffer is not in the document
-                // until the edit ends.
-                restore.run_if(not(crate::text::editing)),
-                record.run_if(on_timer(CHECK)),
+                // A stack kept across a space switch is a way to paste one
+                // board's document over another's.
+                forget.run_if(resource_changed::<Space>),
+                (
+                    // Typing owns the keyboard, and the buffer is not in the
+                    // document until the edit ends.
+                    restore.run_if(not(crate::text::editing)),
+                    record.run_if(on_timer(CHECK)),
+                )
+                    .chain()
+                    .run_if(resource_exists::<Document>),
             )
-                .chain()
-                .run_if(resource_exists::<Document>),
+                .chain(),
         );
     }
 }
@@ -101,6 +107,10 @@ impl History {
 // A clone per check, which is kilobytes — `record` clones the document anyway.
 fn step_rev(canvas: &Canvas) -> String {
     rev(&script::without_script(canvas))
+}
+
+fn forget(mut history: ResMut<History>) {
+    *history = History::default();
 }
 
 fn record(time: Res<Time>, document: Res<Document>, mut history: ResMut<History>) {
