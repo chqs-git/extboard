@@ -84,9 +84,7 @@ impl Plugin for EditPlugin {
             Update,
             (
                 (
-                    grab.run_if(
-                        not(crate::shape::over_panel).and_then(not(crate::theme::over_panel)),
-                    ),
+                    grab.run_if(not(crate::select::pressed_a_panel)),
                     apply.run_if(resource_exists::<Document>),
                     anchors,
                     connect.run_if(resource_exists::<Document>),
@@ -699,6 +697,7 @@ fn connected(canvas: &mut Canvas, seed: u32, from: (&str, Side), to: (&str, Side
         to_side: Some(to.1),
         to_end: None,
         label: None,
+        color: None,
         extra: default(),
     };
     canvas.add_edge(edge).is_ok()

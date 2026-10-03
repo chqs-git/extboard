@@ -1,9 +1,9 @@
 use bevy::prelude::*;
-use extboard_core::{PRIMARY, SECONDARY};
+use extboard_core::{PRIMARY, SECONDARY, stroke_scale, style};
 
 use crate::client::Document;
 use crate::select::Selected;
-use crate::theme::{Theme, hex};
+use crate::theme::Theme;
 
 pub struct NodePlugin;
 
@@ -117,6 +117,9 @@ pub fn depth(node: &extboard_core::Node) -> f32 {
 // A group is a container: what sits inside it, edges included, shows through.
 const GROUP_ALPHA: f32 = 0.45;
 
+// The rim at the middle stroke weight, in canvas units.
+const OUTLINE: f32 = 2.0;
+
 pub fn body_color(theme: &Theme, node: &extboard_core::Node) -> Color {
     match node.kind {
         extboard_core::NodeKind::Group { .. } => node_color(theme, node).with_alpha(GROUP_ALPHA),
@@ -124,24 +127,23 @@ pub fn body_color(theme: &Theme, node: &extboard_core::Node) -> Color {
     }
 }
 
-// The rim, which a node never overrides: one palette per board.
+// The rim: the node's own outline colour when it names one, and the palette's
+// primary when it does not. It fades with the body, so a group's rim is
+// see-through too.
 pub fn outline_color(theme: &Theme, node: &extboard_core::Node) -> Color {
     theme
-        .color(PRIMARY)
+        .paint(style::outline_color(&node.extra), PRIMARY)
         .with_alpha(body_color(theme, node).alpha())
 }
 
-// The space's theme is the palette, so there is no per-kind colour left.
+// The rim's width in canvas units, which the shader multiplies by the zoom.
+pub fn outline_px(node: &extboard_core::Node) -> f32 {
+    OUTLINE * stroke_scale(&node.extra)
+}
+
+// The body: the spec's own colour field, which is the node's background.
 pub fn node_color(theme: &Theme, node: &extboard_core::Node) -> Color {
-    let Some(color) = node.color.as_deref() else {
-        return theme.color(SECONDARY);
-    };
-    // Obsidian's preset index is a slot here, not a hue, so a retheme moves
-    // every node carrying one. `#rrggbb` stays a literal.
-    match color.parse::<usize>() {
-        Ok(slot) => theme.color(slot),
-        Err(_) => hex(color).unwrap_or_else(|| theme.color(SECONDARY)),
-    }
+    theme.paint(node.color.as_deref(), SECONDARY)
 }
 
 #[cfg(test)]

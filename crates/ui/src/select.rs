@@ -29,6 +29,44 @@ pub struct SelectPlugin;
 #[derive(Component)]
 pub struct Selected;
 
+// The frame a press landed on a panel rather than on the board. Picking is what
+// stamps it, and it is read back in `Update`: a hit test of our own cannot do
+// this job, because a panel respawning under the cursor -- which is what a
+// press on one of its buttons makes it do -- leaves the new entity without a
+// laid-out box for a frame, and the board would take that press.
+#[derive(Resource, Default)]
+pub struct PanelPress(Option<u32>);
+
+// On the root of every panel. The press is found by walking up to it, because
+// the widgets bevy ships -- its slider, its text box -- stop a press from
+// bubbling, and a panel is more than the widget that ate the click.
+#[derive(Component)]
+pub struct PanelRoot;
+
+fn panel_press(
+    press: On<Pointer<Press>>,
+    roots: Query<(), With<PanelRoot>>,
+    parents: Query<&ChildOf>,
+    frames: Res<FrameCount>,
+    mut pressed: ResMut<PanelPress>,
+) {
+    let mut at = press.entity;
+    loop {
+        if roots.contains(at) {
+            pressed.0 = Some(frames.0);
+            return;
+        }
+        let Ok(parent) = parents.get(at) else {
+            return;
+        };
+        at = parent.parent();
+    }
+}
+
+pub fn pressed_a_panel(frames: Res<FrameCount>, pressed: Res<PanelPress>) -> bool {
+    pressed.0 == Some(frames.0)
+}
+
 // UI, like the node panels, and above them: a gizmo band would be drawn in the
 // world, which is under every panel it is sweeping over. It lives for the whole
 // run and hides itself, since spawning per gesture would lag a frame behind.
@@ -47,17 +85,15 @@ struct Band {
 
 impl Plugin for SelectPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_fill)
+        app.init_resource::<PanelPress>()
+            .add_observer(panel_press)
+            .add_systems(Startup, spawn_fill)
             // `press` only: a click that ends an edit session is spent on that,
             // and no band can exist while one is open.
             .add_systems(
                 Update,
                 (
-                    press.run_if(
-                        not(crate::text::editing)
-                            .and_then(not(crate::shape::over_panel))
-                            .and_then(not(crate::theme::over_panel)),
-                    ),
+                    press.run_if(not(crate::text::editing).and_then(not(pressed_a_panel))),
                     drag_band,
                     release,
                 )

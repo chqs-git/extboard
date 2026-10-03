@@ -377,6 +377,7 @@ mod tests {
                 to_side: None,
                 to_end: None,
                 label: Some("</svg><script>alert(1)</script>".to_owned()),
+                color: None,
                 extra: Default::default(),
             }],
         );
@@ -452,6 +453,7 @@ mod tests {
                     to_side: None,
                     to_end: None,
                     label: None,
+                    color: None,
                     extra: Default::default(),
                 }],
             ),

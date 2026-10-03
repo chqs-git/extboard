@@ -143,6 +143,9 @@ pub struct Edge {
     pub to_end: Option<End>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    // The spec's colour, read the same way a node's is: a preset slot or a hex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

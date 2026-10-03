@@ -3,15 +3,13 @@ use bevy::prelude::*;
 use bevy::text::{FontStyle, FontWeight};
 use bevy::transform::TransformSystems;
 use bevy::ui::UiSystems;
-use extboard_core::{
-    ACCENT, BACKGROUND, Node as CanvasNode, NodeKind, PRIMARY, PRIMARY_TEXT, TEXT,
-};
+use extboard_core::{ACCENT, BACKGROUND, Node as CanvasNode, NodeKind, PRIMARY, TEXT};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use bevy::camera::CameraUpdateSystems;
 
 use crate::client::Document;
-use crate::theme::Theme;
+use crate::theme::{Face, Theme};
 
 mod edit_text;
 mod panel;
@@ -264,6 +262,7 @@ fn heading_size(level: HeadingLevel) -> f32 {
 pub(super) fn spawn_blocks(
     blocks: &[Block],
     theme: &Theme,
+    face: &Face,
     raster: f32,
     parent: &mut ChildSpawnerCommands,
 ) {
@@ -274,13 +273,13 @@ pub(super) fn spawn_blocks(
                     continue;
                 };
                 parent
-                    .spawn(text_bundle(first, theme, raster))
+                    .spawn(text_bundle(first, theme, face, raster))
                     .with_children(|parent| {
                         for span in rest {
                             parent.spawn((
                                 TextSpan::new(span.text.clone()),
-                                font(span, theme, raster),
-                                TextColor(color(span, theme)),
+                                font(span, face, raster),
+                                TextColor(color(span, theme, face)),
                             ));
                         }
                     });
@@ -335,7 +334,7 @@ pub(super) fn spawn_blocks(
                                             bold: cell.head,
                                             ..default()
                                         },
-                                        theme,
+                                        face,
                                         raster,
                                     ),
                                     TextColor(theme.color(TEXT)),
@@ -348,11 +347,16 @@ pub(super) fn spawn_blocks(
     }
 }
 
-fn text_bundle(span: &Span, theme: &Theme, raster: f32) -> (Text, TextFont, TextColor, TextLayout) {
+fn text_bundle(
+    span: &Span,
+    theme: &Theme,
+    face: &Face,
+    raster: f32,
+) -> (Text, TextFont, TextColor, TextLayout) {
     (
         Text::new(span.text.clone()),
-        font(span, theme, raster),
-        TextColor(color(span, theme)),
+        font(span, face, raster),
+        TextColor(color(span, theme, face)),
         wrap(),
     )
 }
@@ -365,14 +369,14 @@ pub(super) fn wrap() -> TextLayout {
     }
 }
 
-fn font(span: &Span, theme: &Theme, raster: f32) -> TextFont {
+fn font(span: &Span, face: &Face, raster: f32) -> TextFont {
     TextFont {
         // A code span stays in the embedded font, which is FiraMono: `mono` is
-        // carried by family only when the primary text is not already mono.
+        // carried by family only when the text is not already mono.
         font: if span.mono {
             default()
         } else {
-            theme.text_font(PRIMARY_TEXT)
+            face.source.clone()
         },
         weight: if span.bold {
             FontWeight::BOLD
@@ -384,20 +388,20 @@ fn font(span: &Span, theme: &Theme, raster: f32) -> TextFont {
         } else {
             FontStyle::Normal
         },
-        font_smoothing: theme.smoothing(),
+        font_smoothing: face.smoothing,
         ..TextFont::from_font_size(span.size * raster)
     }
 }
 
 // A link and a code span are the runs that are not body text, so they take the
-// two slots that are not the node's own.
-fn color(span: &Span, theme: &Theme) -> Color {
+// two slots that are not the node's own. The body takes the node's stroke.
+fn color(span: &Span, theme: &Theme, face: &Face) -> Color {
     if span.link {
         theme.color(PRIMARY)
     } else if span.mono {
         theme.color(ACCENT)
     } else {
-        theme.color(TEXT)
+        face.ink
     }
 }
 

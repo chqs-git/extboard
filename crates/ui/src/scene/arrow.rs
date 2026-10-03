@@ -5,8 +5,10 @@ const HEAD_HALF_WIDTH: f32 = 8.0;
 // Clear space around a label where the shaft would otherwise run through it.
 const LABEL_PAD: f32 = 6.0;
 
-pub fn draw_arrow(
-    gizmos: &mut Gizmos,
+// Generic over the config group, because a gizmo's width is the group's: the
+// three stroke weights are three groups, and this draws into any of them.
+pub fn draw_arrow<C: GizmoConfigGroup>(
+    gizmos: &mut Gizmos<'_, '_, C>,
     a: Vec2,
     b: Vec2,
     heads: (bool, bool),
@@ -57,7 +59,12 @@ pub(super) fn box_reach(half: Vec2, dir: Vec2) -> f32 {
 
 // Closed triangle, tip at `tip`, pointing along `dir`. Gizmos have no fill, so
 // this is an outline; at the default 2px stroke it reads as solid.
-fn arrow_head(gizmos: &mut Gizmos, tip: Vec2, dir: Vec2, color: Color) {
+fn arrow_head<C: GizmoConfigGroup>(
+    gizmos: &mut Gizmos<'_, '_, C>,
+    tip: Vec2,
+    dir: Vec2,
+    color: Color,
+) {
     let base = tip - dir * HEAD_LEN;
     let side = dir.perp() * HEAD_HALF_WIDTH;
     gizmos.linestrip_2d([tip, base + side, base - side, tip], color);

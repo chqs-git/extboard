@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy::text::TextLayoutInfo;
-use extboard_core::{End, PRIMARY_TEXT, SECONDARY, TEXT};
+use extboard_core::{End, SECONDARY, STROKES, stroke_width, style};
 use std::collections::HashMap;
 
 use crate::client::Document;
@@ -17,15 +17,28 @@ pub use geometry::{nearest, segments};
 const LABEL_SIZE: f32 = 12.0;
 // Above the node rects, which sit at 0.
 const LABEL_Z: f32 = 1.0;
+// The shaft at the middle stroke weight, in screen pixels.
+const SHAFT: f32 = 3.0;
 
 pub struct ScenePlugin;
 
 #[derive(Component)]
 pub struct EdgeId(pub String);
 
+// A gizmo's width is its config group's, not the line's, so the only way to
+// draw two edges at two weights is a group per weight. The middle one is the
+// default group, which is also what the anchors in edit.rs are drawn in.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+struct Thin;
+
+#[derive(Default, Reflect, GizmoConfigGroup)]
+struct Thick;
+
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup);
+        app.insert_gizmo_config(DefaultGizmoConfigGroup, shaft(STROKES[1]))
+            .insert_gizmo_config(Thin, shaft(STROKES[0]))
+            .insert_gizmo_config(Thick, shaft(STROKES[2]));
         app.add_systems(
             Update,
             (
@@ -42,12 +55,24 @@ impl Plugin for ScenePlugin {
     }
 }
 
-fn setup(mut store: ResMut<GizmoConfigStore>) {
-    store.config_mut::<DefaultGizmoConfigGroup>().0.line.width = 3.0;
+fn shaft(scale: f32) -> GizmoConfig {
+    GizmoConfig {
+        line: GizmoLineConfig {
+            width: SHAFT * scale,
+            ..default()
+        },
+        ..default()
+    }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
 fn draw_edges(
-    mut gizmos: Gizmos,
+    mut thin: Gizmos<Thin>,
+    mut mid: Gizmos,
+    mut thick: Gizmos<Thick>,
     document: Res<Document>,
     theme: Res<Theme>,
     selected: Query<&EdgeId, With<Selected>>,
@@ -59,7 +84,7 @@ fn draw_edges(
         let color = if selected.iter().any(|picked| picked.0 == edge.id) {
             OUTLINE
         } else {
-            theme.color(SECONDARY)
+            theme.paint(edge.color.as_deref(), SECONDARY)
         };
         let heads = (
             edge.from_end.unwrap_or(End::None) == End::Arrow,
@@ -69,7 +94,11 @@ fn draw_edges(
             .iter()
             .find(|(id, _)| id.0 == edge.id)
             .map(|(_, label)| label.size);
-        draw_arrow(&mut gizmos, a, b, heads, hole, color);
+        match stroke_width(&edge.extra) {
+            Some(1) => draw_arrow(&mut thin, a, b, heads, hole, color),
+            Some(3) => draw_arrow(&mut thick, a, b, heads, hole, color),
+            _ => draw_arrow(&mut mid, a, b, heads, hole, color),
+        }
     }
 }
 
@@ -97,14 +126,15 @@ fn spawn_edges(
             spawned.insert(Selected);
         }
         if let Some(label) = &edge.label {
+            let face = theme.face(None, style::text_color(&edge.extra));
             spawned.insert((
                 Text2d::new(label.clone()),
                 TextFont {
-                    font: theme.text_font(PRIMARY_TEXT),
-                    font_smoothing: theme.smoothing(),
+                    font: face.source,
+                    font_smoothing: face.smoothing,
                     ..TextFont::from_font_size(LABEL_SIZE)
                 },
-                TextColor(theme.color(TEXT)),
+                TextColor(face.ink),
             ));
         }
     }

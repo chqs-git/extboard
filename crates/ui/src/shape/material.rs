@@ -5,7 +5,7 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 use extboard_core::Node as CanvasNode;
 
-use crate::node::{body_color, outline_color};
+use crate::node::{body_color, outline_color, outline_px};
 use crate::theme::Theme;
 
 use super::RECT_SIDES;
@@ -25,6 +25,8 @@ struct Paint {
     // Canvas units; the laid-out box is this times the zoom.
     size: Vec2,
     sides: f32,
+    // The rim's width, in those same units.
+    edge: f32,
 }
 
 impl UiMaterial for PolygonMaterial {
@@ -35,7 +37,7 @@ impl UiMaterial for PolygonMaterial {
     }
 }
 
-type Look = (u8, [u32; 4], [u32; 4], [u32; 2]);
+type Look = (u8, [u32; 4], [u32; 4], [u32; 2], u32);
 
 // One per look, not per node: the UI batches what shares a handle.
 #[derive(Resource, Default)]
@@ -57,6 +59,7 @@ pub fn paint(
     let color = body_color(theme, node).to_linear().to_f32_array();
     let outline = outline_color(theme, node).to_linear().to_f32_array();
     let size = Vec2::new(node.width as f32, node.height as f32);
+    let edge = outline_px(node);
     palette
         .0
         .entry((
@@ -64,6 +67,7 @@ pub fn paint(
             color.map(f32::to_bits),
             outline.map(f32::to_bits),
             size.to_array().map(f32::to_bits),
+            edge.to_bits(),
         ))
         .or_insert_with(|| {
             materials.add(PolygonMaterial {
@@ -72,6 +76,7 @@ pub fn paint(
                     outline: Vec4::from_array(outline),
                     size,
                     sides: f32::from(sides),
+                    edge,
                 },
             })
         })

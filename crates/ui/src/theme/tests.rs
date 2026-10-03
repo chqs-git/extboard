@@ -94,6 +94,22 @@ fn control_t_opens_the_panel_and_closes_it_again() {
     assert!(!press(&[KeyCode::ControlLeft, KeyCode::KeyT]));
 }
 
+// Both panels live on the right edge, and the script sidebar is the full height
+// of it: opening one is what puts the other away.
+#[test]
+fn opening_this_panel_closes_the_script_sidebar() {
+    let mut app = app();
+    app.world_mut().resource_mut::<Sidebar>().open = true;
+    let mut input = ButtonInput::default();
+    input.press(KeyCode::ControlLeft);
+    input.press(KeyCode::KeyT);
+    app.world_mut().insert_resource(input);
+    app.world_mut().run_schedule(Update);
+
+    assert!(app.world().resource::<Open>().0, "the panel is up");
+    assert!(!app.world().resource::<Sidebar>().open, "and it is alone");
+}
+
 fn opened() -> App {
     let mut app = app();
     app.world_mut().resource_mut::<Open>().0 = true;

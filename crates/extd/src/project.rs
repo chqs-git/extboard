@@ -379,6 +379,8 @@ fn edge(line: &str, original: &Canvas) -> Result<Edge, String> {
         to_side,
         to_end: was.and_then(|edge| edge.to_end),
         label: (!label.is_empty()).then(|| label.clone()),
+        // Not in the projection, so it is carried rather than rewritten.
+        color: was.and_then(|edge| edge.color.clone()),
         extra: was.map(|edge| edge.extra.clone()).unwrap_or_default(),
     })
 }
@@ -631,6 +633,7 @@ mod tests {
             to_side: None,
             to_end: None,
             label: None,
+            color: None,
             extra: Default::default(),
         });
 

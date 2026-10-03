@@ -5,10 +5,9 @@ struct Polygon {
     outline: vec4<f32>,
     size: vec2<f32>,
     sides: f32,
-#ifdef SIXTEEN_BYTE_ALIGNMENT
-    // WebGL2 wants the struct rounded up to sixteen bytes.
-    _webgl2_padding: f32,
-#endif
+    // The outline's thickness, in the same canvas units as `size`. With it the
+    // struct is a round forty-eight bytes, so WebGL2 needs no padding.
+    edge: f32,
 }
 
 @group(1) @binding(0)
@@ -17,8 +16,6 @@ var<uniform> polygon: Polygon;
 const TAU: f32 = 6.2831855;
 const UP: f32 = 1.5707964;
 const CIRCLE: f32 = 10.0;
-// The outline thickness
-const EDGE: f32 = 2.0;
 
 // The same vertices `extboard_core::sides_polygon` computes, and they have to
 // stay the same: the phone view clips from that one.
@@ -71,7 +68,7 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
     let mask = 1.0 - smoothstep(-fade, fade, past);
     // The laid-out box is the node's size times the zoom, so their ratio is it.
     let zoom = in.size.x / max(polygon.size.x, 0.0001);
-    let edge = max(EDGE * zoom, fade);
+    let edge = max(polygon.edge * zoom, fade);
     // Inset: an outline outside the shape is clipped by the panel box.
     let band = smoothstep(-edge - fade, -edge + fade, past);
     let paint = mix(polygon.color, polygon.outline, band);

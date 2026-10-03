@@ -188,6 +188,7 @@ fn deleting_a_node_takes_its_edges_with_it() {
             to_side: None,
             to_end: None,
             label: None,
+            color: None,
             extra: Default::default(),
         })
         .unwrap();

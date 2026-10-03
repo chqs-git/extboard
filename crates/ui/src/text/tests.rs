@@ -57,6 +57,7 @@ fn an_emptied_label_is_dropped_rather_than_written_blank() {
         to_side: None,
         to_end: None,
         label: None,
+        color: None,
         extra: default(),
     });
     let edge = Target::Edge("e1".to_owned());
@@ -222,13 +223,24 @@ fn a_link_and_a_code_span_are_the_themes_rather_than_fixed_colours() {
         mono,
         link,
     };
-    let body = color(&span(false, false), &theme);
-    let link = color(&span(false, true), &theme);
-    let mono = color(&span(true, false), &theme);
+    let face = theme.face(None, None);
+    let body = color(&span(false, false), &theme, &face);
+    let link = color(&span(false, true), &theme, &face);
+    let mono = color(&span(true, false), &theme, &face);
     assert_eq!(body, theme.color(TEXT));
     assert_eq!(link, theme.color(PRIMARY));
     assert_eq!(mono, theme.color(ACCENT));
     assert_eq!([body, link, mono].map(|c| c.alpha()), [1.0; 3]);
+
+    // The node's stroke takes the body text with it, and leaves the two runs
+    // that are not body text where they are.
+    let painted = theme.face(None, Some("1"));
+    assert_eq!(
+        color(&span(false, false), &theme, &painted),
+        theme.color(PRIMARY)
+    );
+    assert_eq!(color(&span(false, true), &theme, &painted), link);
+    assert_eq!(color(&span(true, false), &theme, &painted), mono);
 }
 
 // The tier only trades layout size for transform scale: the glyphs are

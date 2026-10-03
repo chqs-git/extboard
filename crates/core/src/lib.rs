@@ -5,6 +5,7 @@ pub mod geometry;
 pub mod model;
 pub mod mutate;
 pub mod rev;
+pub mod style;
 pub mod theme;
 pub mod validate;
 
@@ -16,6 +17,7 @@ pub use model::{
 };
 pub use mutate::is_canvas_color;
 pub use rev::{fresh_id, rev};
+pub use style::{MID_STROKE, STROKES, stroke_scale, stroke_width};
 pub use theme::{
     ACCENT, BACKGROUND, DEFAULT_FONT, FONT_ROLES, Fonts, MAX_COLORS, MIN_COLORS, PRESETS, PRIMARY,
     PRIMARY_TEXT, ROLES, SECONDARY, TEXT, Theme,
