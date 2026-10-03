@@ -19,7 +19,7 @@ pub struct Space {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("{0} is not a usable space id")]
+    #[error("{0} is not a usable name")]
     BadId(String),
 
     #[error("no space named {0}")]
@@ -95,6 +95,16 @@ impl Store {
         &self.dir
     }
 
+    // A dropped file, into the one directory extd serves and the app resolves
+    // a node's path against. The reply is that path, which is not always the
+    // name sent: two photos called `IMG_0001.jpg` both have to land.
+    pub fn put_file(&self, sub: &str, name: &str, bytes: &[u8]) -> Result<String> {
+        validate_id(name)?;
+        let dir = self.dir.join(sub);
+        fs::create_dir_all(&dir)?;
+        Ok(format!("{sub}/{}", write_new(&dir, name.as_ref(), bytes)?))
+    }
+
     pub fn at(dir: PathBuf) -> Self {
         Self {
             dir,
@@ -117,6 +127,32 @@ impl Store {
             },
         )))
     }
+}
+
+// Never overwrite: two different photos both called `IMG_0001.jpg` have to
+// land. `create_new` rather than a prior `exists` check, because a multi-file
+// drop uploads them at once and both would pick the same free name.
+fn write_new(dir: &std::path::Path, name: &std::path::Path, bytes: &[u8]) -> io::Result<String> {
+    let stem = name.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = match name.extension() {
+        Some(ext) => format!(".{}", ext.to_string_lossy()),
+        None => String::new(),
+    };
+    for n in 0u32.. {
+        let candidate = match n {
+            0 => format!("{stem}{ext}"),
+            n => format!("{stem}-{n}{ext}"),
+        };
+        match fs::File::create_new(dir.join(&candidate)) {
+            Ok(mut file) => {
+                file.write_all(bytes)?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("0.. never runs out")
 }
 
 // Path traversal boundary: an id is one filename component, never a path.

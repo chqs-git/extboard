@@ -111,6 +111,21 @@ pub fn is_image(file: &str) -> bool {
         .any(|ext| lower.ends_with(ext))
 }
 
+// A `file` path as a URL path: the phone view links to it, the editor uploads
+// to it, and a photo called `my holiday.png` has to survive both.
+pub fn url_path(path: &str) -> String {
+    let mut out = String::new();
+    for byte in path.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(*byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 // The two bevy's font loader reads, and so the two a drop may add.
 pub fn is_font(file: &str) -> bool {
     let lower = file.to_ascii_lowercase();
