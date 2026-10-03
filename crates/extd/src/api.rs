@@ -5,7 +5,7 @@ use axum::extract::{Path, State};
 use axum::http::header::{CONTENT_TYPE, ETAG, IF_MATCH, IF_NONE_MATCH};
 use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use extboard_core::{Canvas, rev, validate};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -64,6 +64,7 @@ fn router(state: AppState, dir: PathBuf) -> Router {
         .route("/api/spaces", get(list_spaces))
         .route("/api/spaces/{id}", get(get_space))
         .route("/api/spaces/{id}", put(put_space))
+        .route("/api/spaces/{id}", post(create_space))
         .route("/api/events", get(events))
         .route("/v/{id}", get(view_space))
         .nest_service("/f", ServeDir::new(dir))
@@ -110,6 +111,23 @@ async fn get_space(
         canvas.to_pretty_string(),
     )
         .into_response())
+}
+
+// A new space is an empty canvas. Creation is its own verb so a PUT can stay a
+// compare-and-swap over a document that exists.
+async fn create_space(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, StoreError> {
+    let space = app.store.space(&id)?;
+    let mut guard = space.write().await;
+    if guard.exists() {
+        return Ok(StatusCode::CONFLICT.into_response());
+    }
+
+    let saved = guard.save(&Canvas::default())?;
+    app.events.emit(&id, &saved);
+    Ok((StatusCode::CREATED, [(ETAG, format!("\"{saved}\""))]).into_response())
 }
 
 // write endpoints
@@ -359,6 +377,44 @@ mod tests {
             second,
             "a rejected write touched the file"
         );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The list screen's one write: an empty space appears, and a second POST
+    // does not blank the one already there.
+    #[tokio::test]
+    async fn create_space_makes_an_empty_canvas_once() {
+        let dir = std::env::temp_dir().join("extboard-create-space-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let state: AppState = state(dir.clone());
+        let post = || {
+            router(state.clone(), dir.clone()).oneshot(
+                Request::post("/api/spaces/fresh")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+
+        let made = post().await.unwrap();
+        assert_eq!(made.status(), StatusCode::CREATED);
+        let canvas = state.store.space("fresh").unwrap().read().await.load();
+        assert_eq!(canvas.unwrap(), Canvas::default());
+
+        let node = r#"{"nodes":[{"id":"n1","type":"text","x":0,"y":0,"width":10,"height":10,"text":"hi"}],"edges":[]}"#;
+        std::fs::write(dir.join("fresh.canvas"), node).unwrap();
+        assert_eq!(post().await.unwrap().status(), StatusCode::CONFLICT);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("fresh.canvas")).unwrap(),
+            node,
+            "a refused create overwrote the space"
+        );
+
+        let bad = router(state, dir.clone())
+            .oneshot(Request::post("/api/spaces/..").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

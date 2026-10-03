@@ -38,6 +38,10 @@ pub enum StoreError {
 type Result<T> = std::result::Result<T, StoreError>;
 
 impl Space {
+    pub fn exists(&self) -> bool {
+        self.path.is_file()
+    }
+
     pub fn load(&self) -> Result<Canvas> {
         let bytes = fs::read(&self.path).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => StoreError::NotFound(self.id.to_string()),

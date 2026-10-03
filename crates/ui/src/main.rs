@@ -8,6 +8,7 @@ mod scene;
 mod script;
 mod select;
 mod shape;
+mod spaces;
 mod sync;
 mod text;
 mod theme;
@@ -27,6 +28,10 @@ fn main() {
                     primary_window: Some(Window {
                         title: "ext.board".to_owned(),
                         present_mode: PresentMode::AutoNoVsync,
+                        // In the browser the board is the page. winit sizes the
+                        // canvas in inline px, which beats the stylesheet, and
+                        // this is what overrides it back to the viewport.
+                        fit_canvas_to_parent: true,
                         ..default()
                     }),
                     ..default()
@@ -53,6 +58,7 @@ fn main() {
             script::ScriptPlugin,
             select::SelectPlugin,
             shape::ShapePlugin,
+            spaces::SpacesPlugin,
             sync::SyncPlugin,
             text::TextPlugin,
             theme::ThemePlugin,

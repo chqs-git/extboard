@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use ehttp::streaming::Part;
 use extboard_core::Canvas;
 use std::ops::ControlFlow;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 // extd serves the bundle on wasm, so a relative path is same-origin and needs
@@ -12,7 +12,6 @@ pub const BASE_URL: &str = "";
 // extd's default port
 #[cfg(not(target_arch = "wasm32"))]
 pub const BASE_URL: &str = "http://127.0.0.1:7777";
-pub const TESTING_SPACE_ID: &str = "kitchen-sink";
 const RETRY_SECS: f32 = 2.0;
 
 // Where a `file` node's path resolves from: extd's spaces dir. In the browser
@@ -34,9 +33,15 @@ pub fn files_root() -> String {
         .into_owned()
 }
 
-pub fn space_id() -> &'static str {
-    static ID: OnceLock<String> = OnceLock::new();
-    ID.get_or_init(|| page_space_id().unwrap_or_else(|| TESTING_SPACE_ID.to_owned()))
+// The space on screen. `None` is the spaces list: no space is open, so there
+// is nothing to fetch and nothing to save.
+#[derive(Resource, Default)]
+pub struct Space(pub Option<String>);
+
+impl Space {
+    pub fn id(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -75,10 +80,12 @@ pub struct Notice(pub Option<String>);
 #[derive(Component)]
 struct ErrorText;
 
+// Every update names the space it is about: a reply from the space just left
+// must not land on the one just opened.
 #[derive(Debug)]
 enum Update {
-    Loaded(Canvas, String),
-    Changed(String),
+    Loaded(String, Canvas, String),
+    Changed(String, String),
     Disconnected,
     Failed(String),
 }
@@ -106,28 +113,46 @@ impl Default for Live {
 
 impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Live>()
+        app.insert_resource(Space(page_space_id()))
+            .init_resource::<Live>()
             .init_resource::<Rev>()
             .init_resource::<Notice>()
             .add_systems(
                 Update,
                 (
-                    (apply, connect).chain(),
+                    (switch.run_if(resource_changed::<Space>), apply, connect).chain(),
                     show_notice.run_if(resource_changed::<Notice>),
                 ),
             );
     }
 }
 
-fn connect(time: Res<Time>, mut live: ResMut<Live>, rev: Res<Rev>) {
+fn connect(time: Res<Time>, mut live: ResMut<Live>, rev: Res<Rev>, space: Res<Space>) {
+    let Some(id) = space.id() else {
+        return;
+    };
     if live.subscribed || !live.retry.tick(time.delta()).is_finished() {
         return;
     }
     // Refetch as well as resubscribe: the file can have moved on while we were
     // not listening.
-    fetch(&live.inbox, &rev.0);
+    fetch(&live.inbox, &rev.0, id);
     subscribe(&live.inbox);
     live.subscribed = true;
+}
+
+// Another space is another document: the rev it is compared and swapped against
+// is gone, and an empty canvas is what clears the board while the new one is in
+// the air. The stream stays open -- it carries every space, and `apply` is what
+// picks ours out of it.
+fn switch(mut commands: Commands, space: Res<Space>, mut rev: ResMut<Rev>, live: Res<Live>) {
+    rev.0.clear();
+    commands.insert_resource(Document(Canvas::default()));
+    // Not on the first frame: `connect` has not subscribed yet, and its own
+    // fetch is the one that lands.
+    if let (Some(id), true) = (space.id(), live.subscribed) {
+        fetch(&live.inbox, "", id);
+    }
 }
 
 fn apply(
@@ -135,18 +160,29 @@ fn apply(
     mut live: ResMut<Live>,
     mut rev: ResMut<Rev>,
     mut notice: ResMut<Notice>,
+    space: Res<Space>,
 ) {
     let batch = std::mem::take(&mut *lock(&live.inbox));
     for update in batch {
+        // Anything about a space we no longer have open is stale by now.
+        if let Some(about) = update.space()
+            && space.id() != Some(about)
+        {
+            continue;
+        }
         match update {
-            Update::Loaded(canvas, loaded) => {
+            Update::Loaded(_, canvas, loaded) => {
                 info!("canvas {loaded}: {} nodes", canvas.nodes.len());
                 rev.0 = loaded;
                 commands.insert_resource(Document(canvas));
             }
             // A rev we already hold is our own save echoing back off the disk.
-            Update::Changed(changed) if changed != rev.0 => fetch(&live.inbox, &rev.0),
-            Update::Changed(_) => {}
+            Update::Changed(_, changed) if changed != rev.0 => {
+                if let Some(id) = space.id() {
+                    fetch(&live.inbox, &rev.0, id);
+                }
+            }
+            Update::Changed(..) => {}
             Update::Disconnected => {
                 live.subscribed = false;
                 live.retry.reset();
@@ -186,12 +222,12 @@ fn show_notice(
     ));
 }
 
-pub fn space_url() -> String {
-    format!("{BASE_URL}/api/spaces/{}", space_id())
+pub fn space_url(space: &str) -> String {
+    format!("{BASE_URL}/api/spaces/{space}")
 }
 
-fn fetch(inbox: &Inbox, rev: &str) {
-    let mut request = ehttp::Request::get(space_url());
+fn fetch(inbox: &Inbox, rev: &str, space: &str) {
+    let mut request = ehttp::Request::get(space_url(space));
     if !rev.is_empty() {
         request
             .headers
@@ -199,14 +235,15 @@ fn fetch(inbox: &Inbox, rev: &str) {
     }
 
     let inbox = inbox.clone();
+    let space = space.to_owned();
     ehttp::fetch(request, move |result| {
-        if let Some(update) = loaded(result) {
+        if let Some(update) = loaded(&space, result) {
             lock(&inbox).push(update);
         }
     });
 }
 
-fn loaded(result: ehttp::Result<ehttp::Response>) -> Option<Update> {
+fn loaded(space: &str, result: ehttp::Result<ehttp::Response>) -> Option<Update> {
     // A dead server is a transport error; a live one can still answer 404/500,
     // which ehttp reports as Ok. Both have to read as a failure.
     let response = match result {
@@ -224,9 +261,23 @@ fn loaded(result: ehttp::Result<ehttp::Response>) -> Option<Update> {
         return Some(Update::Failed(format!("extd returned {}", response.status)));
     }
     Some(match serde_json::from_slice(&response.bytes) {
-        Ok(canvas) => Update::Loaded(canvas, etag_rev(&response)),
+        Ok(canvas) => Update::Loaded(space.to_owned(), canvas, etag_rev(&response)),
         Err(e) => Update::Failed(format!("bad canvas from extd: {e}")),
     })
+}
+
+impl Update {
+    // The space it is about, where it is about one: a failure or a dropped
+    // stream is the client's own news and belongs to whatever is open.
+    fn space(&self) -> Option<&str> {
+        match self {
+            // A lagged stream names no space, so it is news about ours too.
+            Update::Loaded(space, ..) | Update::Changed(space, _) => {
+                (!space.is_empty()).then_some(space.as_str())
+            }
+            Update::Disconnected | Update::Failed(_) => None,
+        }
+    }
 }
 
 pub fn etag_rev(response: &ehttp::Response) -> String {
@@ -258,8 +309,8 @@ fn subscribe(inbox: &Inbox) {
         let mut buffer = lock_string(&buffer);
         buffer.push_str(&String::from_utf8_lossy(&chunk));
         for frame in drain_frames(&mut buffer) {
-            if let Some(rev) = changed_rev(&frame, space_id()) {
-                lock(&inbox).push(Update::Changed(rev));
+            if let Some((space, rev)) = changed_rev(&frame) {
+                lock(&inbox).push(Update::Changed(space, rev));
             }
         }
         ControlFlow::Continue(())
@@ -275,7 +326,9 @@ fn drain_frames(buffer: &mut String) -> Vec<String> {
     frames
 }
 
-fn changed_rev(frame: &str, space: &str) -> Option<String> {
+// `(space, rev)`. A lagged stream names neither, and an empty rev is one no
+// client can be holding, so it reads as a change to whatever is open.
+fn changed_rev(frame: &str) -> Option<(String, String)> {
     let mut changed = false;
     let mut data = None;
     for line in frame.lines() {
@@ -292,8 +345,8 @@ fn changed_rev(frame: &str, space: &str) -> Option<String> {
 
     let data: serde_json::Value = serde_json::from_str(&data?).ok()?;
     match (data.get("space"), data.get("rev")) {
-        (Some(s), Some(rev)) if s.as_str() == Some(space) => Some(rev.as_str()?.to_owned()),
-        (None, None) => Some(String::new()),
+        (Some(space), Some(rev)) => Some((space.as_str()?.to_owned(), rev.as_str()?.to_owned())),
+        (None, None) => Some((String::new(), String::new())),
         _ => None,
     }
 }
@@ -314,7 +367,7 @@ mod tests {
     fn the_space_is_the_first_segment_after_s() {
         assert_eq!(space_from_path("/s/kitchen-sink"), Some("kitchen-sink"));
         assert_eq!(space_from_path("/s/lisbon-trip/"), Some("lisbon-trip"));
-        // No id in the path: `space_id` falls back to the testing space.
+        // No id in the path: the app opens on the spaces list.
         assert_eq!(space_from_path("/"), None);
         assert_eq!(space_from_path("/s/"), None);
         assert_eq!(space_from_path("/v/kitchen-sink"), None);
@@ -333,7 +386,7 @@ mod tests {
 
     #[test]
     fn every_failure_carries_a_message() {
-        let failed = |result| matches!(loaded(result), Some(Update::Failed(_)));
+        let failed = |result| matches!(loaded("a", result), Some(Update::Failed(_)));
         // Server down: this is the case that used to panic off-thread.
         assert!(failed(Err("connection refused".to_owned())));
         // Server up, space missing: ehttp calls this Ok.
@@ -343,12 +396,12 @@ mod tests {
 
     #[test]
     fn a_load_carries_the_etags_rev_and_304_carries_nothing() {
-        let got = loaded(Ok(response(200, r#"{"nodes":[],"edges":[]}"#)));
+        let got = loaded("a", Ok(response(200, r#"{"nodes":[],"edges":[]}"#)));
         assert!(
-            matches!(&got, Some(Update::Loaded(_, rev)) if rev == "r1"),
+            matches!(&got, Some(Update::Loaded(space, _, rev)) if space == "a" && rev == "r1"),
             "{got:?}"
         );
-        assert!(loaded(Ok(response(304, ""))).is_none());
+        assert!(loaded("a", Ok(response(304, ""))).is_none());
     }
 
     #[test]
@@ -360,20 +413,37 @@ mod tests {
         buffer.push_str("v\":\"r2\"}\n\n");
         let frames = drain_frames(&mut buffer);
         assert_eq!(frames.len(), 1);
-        assert_eq!(changed_rev(&frames[0], "a").as_deref(), Some("r2"));
+        assert_eq!(
+            changed_rev(&frames[0]),
+            Some(("a".to_owned(), "r2".to_owned()))
+        );
         assert!(buffer.is_empty());
     }
 
+    // Which space a change is about is the frame's to say; `apply` is what
+    // decides whether we care. Only a space we have open is `Update::space`'s.
     #[test]
-    fn only_our_spaces_changes_count() {
+    fn a_change_carries_its_space_and_only_the_open_one_is_ours() {
         let frame = |data: &str| format!("event: changed\ndata: {data}");
         assert_eq!(
-            changed_rev(&frame(r#"{"space":"b","rev":"r2"}"#), "a"),
-            None
+            changed_rev(&frame(r#"{"space":"b","rev":"r2"}"#)),
+            Some(("b".to_owned(), "r2".to_owned()))
         );
-        assert_eq!(changed_rev(":ping", "a"), None);
-        assert_eq!(changed_rev("event: hello\ndata: {}", "a"), None);
-        // Lagged: no rev to compare, so it has to look like a change.
-        assert_eq!(changed_rev(&frame("{}"), "a"), Some(String::new()));
+        assert_eq!(changed_rev(":ping"), None);
+        assert_eq!(changed_rev("event: hello\ndata: {}"), None);
+        // Lagged: no space and no rev to compare, so it is a change to ours.
+        assert_eq!(
+            changed_rev(&frame("{}")),
+            Some((String::new(), String::new()))
+        );
+
+        let about = |space: &str| {
+            Update::Changed(space.to_owned(), "r2".to_owned())
+                .space()
+                .map(ToOwned::to_owned)
+        };
+        assert_eq!(about("b").as_deref(), Some("b"));
+        assert_eq!(about(""), None);
+        assert_eq!(Update::Disconnected.space(), None);
     }
 }

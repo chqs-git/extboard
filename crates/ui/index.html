@@ -11,9 +11,9 @@
       data-wasm-opt-params="--strip-debug --enable-bulk-memory --enable-bulk-memory-opt --enable-multivalue --enable-mutable-globals --enable-nontrapping-float-to-int --enable-reference-types --enable-sign-ext" />
 <style>
   html, body { margin: 0; height: 100%; background: #12121a; overflow: hidden; }
-  /* Bevy sizes the canvas from the window; without this it keeps its own
-     aspect ratio and letterboxes inside the viewport. */
-  canvas { display: block; width: 100%; height: 100%; }
+  /* The size is `fit_canvas_to_parent`'s, written inline on the canvas; `block`
+     is still ours, or the inline baseline leaves a gap under it. */
+  canvas { display: block; }
 </style>
 </head>
 <body></body>

@@ -2,7 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Map, Value};
 
 // main model
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Canvas {
     #[serde(default)]
     pub nodes: Vec<Node>,

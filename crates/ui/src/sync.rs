@@ -4,7 +4,7 @@ use extboard_core::{Canvas, rev};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use crate::client::{Document, Notice, Rev, etag_rev, space_url};
+use crate::client::{Document, Notice, Rev, Space, etag_rev, space_url};
 
 // A save is the whole document, so the only thing that makes it cheap is not
 // making many: half a second of quiet, however the document was changed.
@@ -88,9 +88,13 @@ impl Plugin for SyncPlugin {
             .init_resource::<Ticked>()
             .add_systems(
                 Update,
-                (adopt, send.run_if(on_timer(CHECK)))
-                    .chain()
-                    .run_if(resource_exists::<Document>),
+                (
+                    forget.run_if(resource_changed::<Space>),
+                    (adopt, send.run_if(on_timer(CHECK)))
+                        .chain()
+                        .run_if(resource_exists::<Document>),
+                )
+                    .chain(),
             );
     }
 }
@@ -110,15 +114,27 @@ impl Save {
     }
 }
 
+// A space switch leaves every rev here naming another file. A fresh inbox is
+// part of that: the reply to a save still in the air belongs to the space it
+// was sent to, and adopting its rev here would stamp it on this one.
+fn forget(mut save: ResMut<Save>, mut ticked: ResMut<Ticked>) {
+    *save = Save::default();
+    *ticked = Ticked::default();
+}
+
 fn send(
     time: Res<Time>,
     document: Res<Document>,
     base: Res<Rev>,
     ticked: Res<Ticked>,
+    space: Res<Space>,
     mut save: ResMut<Save>,
 ) {
     // Without a rev there is nothing to compare and swap against, so the first
-    // load has to land before the first save.
+    // load has to land before the first save. The spaces list has neither.
+    let Some(id) = space.id() else {
+        return;
+    };
     if base.0.is_empty() {
         return;
     }
@@ -132,7 +148,7 @@ fn send(
         return;
     }
     save.in_flight = true;
-    put(&save.inbox, &document.0, &base.0);
+    put(&save.inbox, &document.0, &base.0, id);
 }
 
 fn adopt(
@@ -191,16 +207,16 @@ fn clear(notice: &mut ResMut<Notice>) {
     }
 }
 
-fn put(inbox: &Inbox, canvas: &Canvas, base: &str) {
+fn put(inbox: &Inbox, canvas: &Canvas, base: &str, space: &str) {
     let inbox = inbox.clone();
-    ehttp::fetch(request(canvas, base), move |result| {
+    ehttp::fetch(request(canvas, base, space), move |result| {
         lock(&inbox).push(replied(result));
     });
 }
 
 // The headers are built, not amended: `Headers::insert` appends, and extd reads
 // the first Content-Type, which on a `put` is ehttp's own text/plain.
-fn request(canvas: &Canvas, base: &str) -> ehttp::Request {
+fn request(canvas: &Canvas, base: &str, space: &str) -> ehttp::Request {
     let if_match = format!("\"{base}\"");
     ehttp::Request {
         headers: ehttp::Headers::new(&[
@@ -208,7 +224,7 @@ fn request(canvas: &Canvas, base: &str) -> ehttp::Request {
             ("Content-Type", "application/json"),
             ("If-Match", &if_match),
         ]),
-        ..ehttp::Request::put(space_url(), canvas.to_pretty_string().into_bytes())
+        ..ehttp::Request::put(space_url(space), canvas.to_pretty_string().into_bytes())
     }
 }
 
@@ -257,7 +273,7 @@ mod tests {
     #[test]
     fn a_save_is_one_json_content_type_and_the_rev_it_is_based_on() {
         let canvas: Canvas = serde_json::from_str(r#"{"nodes":[],"edges":[]}"#).unwrap();
-        let got = request(&canvas, "r1");
+        let got = request(&canvas, "r1", "a");
         assert_eq!(
             got.headers.get_all("content-type").collect::<Vec<_>>(),
             ["application/json"]
