@@ -11,7 +11,8 @@ pub mod validate;
 pub use error::{MutationError, ValidationError};
 pub use geometry::{edge_ends, side_anchor, side_facing, sides_inset, sides_polygon};
 pub use model::{
-    CIRCLE_SIDES, Canvas, Edge, End, MIN_SIDES, Node, NodeKind, Side, object_mut, sides_of,
+    CIRCLE_SIDES, Canvas, Edge, End, MIN_SIDES, Node, NodeKind, Side, is_image, object_mut,
+    sides_of,
 };
 pub use mutate::is_canvas_color;
 pub use rev::{fresh_id, rev};

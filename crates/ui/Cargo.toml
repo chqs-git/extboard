@@ -37,6 +37,12 @@ bevy = { version = "0.19", default-features = false, features = [
   "mouse",
   # 2D render path
   "bevy_render",
+  # E8-T4's image nodes, over `is_image`'s list minus svg and avif, which only
+  # the phone view's browser decodes.
+  "png",
+  "jpeg",
+  "webp",
+  "gif",
   "bevy_core_pipeline",
   "bevy_sprite",
   "bevy_sprite_render",

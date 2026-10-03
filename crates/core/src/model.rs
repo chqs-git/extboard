@@ -102,6 +102,15 @@ pub enum NodeKind {
     },
 }
 
+// What a `file` node draws as a picture rather than as a link. One list, so
+// the app, the phone view and the projection agree on what an image is.
+pub fn is_image(file: &str) -> bool {
+    let lower = file.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
 pub const MIN_SIDES: u8 = 3;
 pub const CIRCLE_SIDES: u8 = 10;
 

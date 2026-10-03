@@ -227,6 +227,35 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    // The images an image node points at, and the trust boundary around them:
+    // the dir is served whole, so nothing above it may be reachable.
+    #[tokio::test]
+    async fn the_spaces_dir_is_served_under_f_and_nothing_above_it_is() {
+        let root = std::env::temp_dir().join("extboard-files-test");
+        let dir = root.join("spaces");
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+        std::fs::write(dir.join("images/a.png"), b"\x89PNG").unwrap();
+        std::fs::write(root.join("secret"), b"not yours").unwrap();
+        let app = || router(state(dir.clone()), dir.clone());
+
+        let served = app()
+            .oneshot(Request::get("/f/images/a.png").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(served.status(), StatusCode::OK);
+        assert_eq!(served.headers()[CONTENT_TYPE], "image/png");
+
+        for path in ["/f/../secret", "/f/%2e%2e/secret", "/f/images/../../secret"] {
+            let got = app()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_ne!(got.status(), StatusCode::OK, "{path} escaped the dir");
+        }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     // `oneshot` feeds one request straight into the Router and returns the
     // response — no socket, no port, no runtime teardown. This is the way to
     // test axum handlers.

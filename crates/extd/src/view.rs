@@ -5,7 +5,7 @@
 //! second consumer.
 
 use extboard_core::{
-    CIRCLE_SIDES, Canvas, End, Node, NodeKind, edge_ends, sides_inset, sides_polygon,
+    CIRCLE_SIDES, Canvas, End, Node, NodeKind, edge_ends, is_image, sides_inset, sides_polygon,
 };
 use pulldown_cmark::{Event, Options, Parser};
 use std::fmt::Write;
@@ -241,13 +241,6 @@ fn file_node(file: &str) -> String {
     } else {
         format!(r#"<a href="{}">{}</a>"#, esc(&src), esc(file))
     }
-}
-
-fn is_image(file: &str) -> bool {
-    let lower = file.to_ascii_lowercase();
-    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif"]
-        .iter()
-        .any(|ext| lower.ends_with(ext))
 }
 
 /// Markdown to HTML, with every raw-HTML event dropped. A canvas can arrive by

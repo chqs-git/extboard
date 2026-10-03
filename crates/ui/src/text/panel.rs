@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use extboard_core::{Node as CanvasNode, NodeKind, TEXT, sides_inset};
+use extboard_core::{Node as CanvasNode, NodeKind, TEXT, is_image, sides_inset};
 use std::collections::HashMap;
 
 use crate::camera::world_to_screen;
@@ -25,11 +25,16 @@ pub(super) struct Panel(String);
 #[derive(Component)]
 pub(super) struct Content(String);
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
 pub(super) fn spawn_panels(
     mut commands: Commands,
     document: Res<Document>,
     editing: Res<Editing>,
     theme: Res<Theme>,
+    assets: Res<AssetServer>,
     mut palette: ResMut<Palette>,
     mut materials: ResMut<Assets<PolygonMaterial>>,
     existing: Query<Entity, With<Panel>>,
@@ -73,7 +78,7 @@ pub(super) fn spawn_panels(
                             ..default()
                         },
                     ))
-                    .with_children(|parent| inside(node, &editing, &theme, parent));
+                    .with_children(|parent| inside(node, &editing, &theme, &assets, parent));
             });
     }
 }
@@ -86,13 +91,29 @@ pub(super) fn back_to_front(nodes: &[CanvasNode]) -> Vec<&CanvasNode> {
     order
 }
 
-fn inside(node: &CanvasNode, editing: &Editing, theme: &Theme, parent: &mut ChildSpawnerCommands) {
+fn inside(
+    node: &CanvasNode,
+    editing: &Editing,
+    theme: &Theme,
+    assets: &AssetServer,
+    parent: &mut ChildSpawnerCommands,
+) {
     let open = editing.node() == Some(node.id.as_str());
     match (&node.kind, markdown(node)) {
         (_, Some(md)) if open => {
             parent.spawn(editor(md, theme.color(TEXT)));
         }
         (_, Some(md)) => spawn_blocks(&blocks(md), theme, parent),
+        // The file is a path in the spaces dir, which is the asset root.
+        (NodeKind::File { file, .. }, _) if is_image(file) => {
+            parent.spawn((
+                ImageNode::new(assets.load(file.clone())),
+                Node {
+                    width: percent(100.0),
+                    ..default()
+                },
+            ));
+        }
         (NodeKind::Group { label: Some(label) }, _) => {
             parent.spawn((
                 Text::new(label.clone()),
