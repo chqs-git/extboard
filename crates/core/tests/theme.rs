@@ -1,4 +1,6 @@
-use extboard_core::{BACKGROUND, Canvas, MAX_COLORS, MIN_COLORS, PRESETS, Theme};
+use extboard_core::{
+    BACKGROUND, Canvas, DEFAULT_FONT, Fonts, MAX_COLORS, MIN_COLORS, PRESETS, PRIMARY_TEXT, Theme,
+};
 
 fn canvas(json: &str) -> Canvas {
     serde_json::from_str(json).expect("fixture")
@@ -170,4 +172,91 @@ fn a_fresh_name_steps_past_every_name_already_taken() {
             colors: vec!["#111111".to_owned()],
         }));
     }
+}
+
+#[test]
+fn a_space_with_no_fonts_draws_every_text_in_the_embedded_one() {
+    let canvas = canvas(r#"{"nodes":[],"edges":[]}"#);
+    let fonts = canvas.fonts();
+    assert_eq!(fonts, Fonts::default());
+    assert_eq!(fonts.font(PRIMARY_TEXT), Some(DEFAULT_FONT));
+    assert_eq!(fonts.font(1), None);
+    assert_eq!(fonts.font(2), None);
+    assert_eq!(fonts.font(9), None);
+}
+
+#[test]
+fn a_text_points_at_a_font_the_library_has_and_falls_back_when_it_does_not() {
+    let mut fonts = Fonts::default();
+    fonts.add("fonts/Inter.ttf");
+    fonts.set(PRIMARY_TEXT, "fonts/Inter.ttf");
+    fonts.set(1, "fonts/Inter.ttf");
+    assert_eq!(fonts.font(PRIMARY_TEXT), Some("fonts/Inter.ttf"));
+    assert_eq!(fonts.font(1), Some("fonts/Inter.ttf"));
+
+    // Removing it takes both texts back to what they were.
+    fonts.remove("fonts/Inter.ttf");
+    assert!(fonts.library.is_empty());
+    assert_eq!(fonts.font(PRIMARY_TEXT), Some(DEFAULT_FONT));
+    assert_eq!(fonts.font(1), None);
+
+    // A hand-written file may point anywhere; it still draws.
+    let stale: Fonts = serde_json::from_str(r#"{"text":["Nonesuch","Nonesuch",""]}"#).unwrap();
+    assert_eq!(stale.font(PRIMARY_TEXT), Some(DEFAULT_FONT));
+    assert_eq!(stale.font(1), None);
+
+    // And the embedded font is selectable without being in the library.
+    let mut fonts = Fonts::default();
+    fonts.set(1, DEFAULT_FONT);
+    assert_eq!(fonts.font(1), Some(DEFAULT_FONT));
+}
+
+// Three is the texts, not the shelf: a board holds as many fonts as have been
+// dropped on it, and each of them once.
+#[test]
+fn the_library_takes_every_font_dropped_on_it_and_each_one_once() {
+    let mut fonts = Fonts::default();
+    for n in 0..8 {
+        fonts.add(&format!("fonts/{n}.ttf"));
+    }
+    assert_eq!(fonts.library.len(), 8);
+
+    fonts.add("fonts/0.ttf");
+    assert_eq!(fonts.library.len(), 8);
+    assert_eq!(fonts.library[0], "fonts/0.ttf");
+}
+
+// A font is not part of a palette: picking a theme has to leave the fonts.
+#[test]
+fn a_theme_write_leaves_the_fonts_and_a_font_write_leaves_the_palette() {
+    let mut canvas = canvas(r#"{"nodes":[],"edges":[]}"#);
+    let mut fonts = Fonts::default();
+    fonts.add("fonts/Inter.ttf");
+    fonts.set(PRIMARY_TEXT, "fonts/Inter.ttf");
+    canvas.set_fonts(&fonts);
+    canvas.set_theme(&Theme::preset("dracula-dark"));
+
+    assert_eq!(canvas.fonts(), fonts);
+    assert_eq!(canvas.theme().name, "dracula-dark");
+    assert_eq!(canvas.extra["theme"]["fonts"][0], "fonts/Inter.ttf");
+    assert_eq!(canvas.extra["theme"]["text"][0], "fonts/Inter.ttf");
+}
+
+// Reading fonts is not writing them: a space with none keeps a file with none.
+#[test]
+fn clearing_the_fonts_takes_the_keys_back_out() {
+    let mut canvas = canvas(r#"{"nodes":[],"edges":[]}"#);
+    canvas.set_fonts(&Fonts::default());
+    assert!(canvas.extra.get("theme").is_none());
+
+    let mut fonts = Fonts::default();
+    fonts.add("fonts/Inter.ttf");
+    fonts.set(PRIMARY_TEXT, "fonts/Inter.ttf");
+    canvas.set_fonts(&fonts);
+    assert!(canvas.extra["theme"].get("fonts").is_some());
+
+    fonts.remove("fonts/Inter.ttf");
+    canvas.set_fonts(&fonts);
+    assert!(canvas.extra["theme"].get("fonts").is_none());
+    assert!(canvas.extra["theme"].get("text").is_none());
 }

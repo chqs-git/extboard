@@ -23,6 +23,63 @@ pub struct Theme {
     pub colors: Vec<String>,
 }
 
+// Three texts, and every text on the board is the primary one until nodes can
+// name one of their own.
+pub const FONT_ROLES: [&str; 3] = ["primary", "secondary", "tertiary"];
+pub const PRIMARY_TEXT: usize = 0;
+// The embedded font: every space has it, no space stores it, and it is what
+// the primary text is until something else is chosen.
+pub const DEFAULT_FONT: &str = "FiraMono";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fonts {
+    // A file in the spaces dir, or the name of a family the system has.
+    #[serde(default, rename = "fonts", skip_serializing_if = "Vec::is_empty")]
+    pub library: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub text: Vec<String>,
+}
+
+impl Fonts {
+    // What a text draws in: the embedded font for the primary one, nothing for
+    // the other two. A name the library does not have reads as unset, which is
+    // what keeps a hand-edited file from pointing at a font that is not there.
+    pub fn font(&self, role: usize) -> Option<&str> {
+        match self.text.get(role).map(String::as_str) {
+            // The one name that needs no library behind it.
+            Some(DEFAULT_FONT) => Some(DEFAULT_FONT),
+            Some(name) if self.library.iter().any(|had| had == name) => Some(name),
+            _ => (role == PRIMARY_TEXT).then_some(DEFAULT_FONT),
+        }
+    }
+
+    // The same font twice is one font: the library is a set, in a list because
+    // the panel draws it in order.
+    pub fn add(&mut self, font: &str) {
+        if !self.library.iter().any(|had| had == font) {
+            self.library.push(font.to_owned());
+        }
+    }
+
+    // The roles pointing at it come back to the default with it.
+    pub fn remove(&mut self, font: &str) {
+        self.library.retain(|had| had != font);
+        for text in &mut self.text {
+            if text == font {
+                text.clear();
+            }
+        }
+    }
+
+    pub fn set(&mut self, role: usize, font: &str) {
+        if role >= FONT_ROLES.len() {
+            return;
+        }
+        self.text.resize(FONT_ROLES.len(), String::new());
+        self.text[role] = font.to_owned();
+    }
+}
+
 // The palettes that ship. The first is what a space with no theme gets, and
 // every one of them is eight colours: the five roles and three extra accents.
 pub const PRESETS: [(&str, [&str; 8]); 4] = [
@@ -41,7 +98,7 @@ pub const PRESETS: [(&str, [&str; 8]); 4] = [
     (
         "EverForest",
         [
-            "#282e31", "#8da06e", "#363e43", "#494841", "#8da06e", "#52796f", "#84a98c", "#6a994e",
+            "#171a1c", "#8da06e", "#363e43", "#494841", "#8da06e", "#52796f", "#84a98c", "#6a994e",
         ],
     ),
     (
@@ -146,6 +203,39 @@ impl Canvas {
                     .collect(),
             ),
         };
+    }
+
+    pub fn fonts(&self) -> Fonts {
+        let mut fonts: Fonts = self
+            .extra
+            .get("theme")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
+        fonts.text.truncate(FONT_ROLES.len());
+        fonts
+    }
+
+    // The two keys beside the palette's, each dropped when it says nothing: a
+    // space that never had a font keeps a theme block that never mentions one.
+    pub fn set_fonts(&mut self, fonts: &Fonts) {
+        if fonts == &Fonts::default() && !self.extra.contains_key("theme") {
+            return;
+        }
+        let block = object_mut(&mut self.extra, "theme");
+        // Three texts, and as many fonts as have been dropped on the board.
+        let text = &fonts.text[..fonts.text.len().min(FONT_ROLES.len())];
+        for (key, list) in [("fonts", fonts.library.as_slice()), ("text", text)] {
+            match list.iter().any(|name| !name.is_empty()) {
+                true => block.insert(
+                    key.to_owned(),
+                    list.iter()
+                        .map(|name| Value::String(name.clone()))
+                        .collect(),
+                ),
+                false => block.remove(key),
+            };
+        }
     }
 
     // Beside the scripts under the key already ours. `serde_json`'s map is

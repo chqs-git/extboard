@@ -11,12 +11,13 @@ pub mod validate;
 pub use error::{MutationError, ValidationError};
 pub use geometry::{edge_ends, side_anchor, side_facing, sides_inset, sides_polygon};
 pub use model::{
-    CIRCLE_SIDES, Canvas, Edge, End, MIN_SIDES, Node, NodeKind, Side, is_image, object_mut,
-    sides_of,
+    CIRCLE_SIDES, Canvas, Edge, End, MIN_SIDES, Node, NodeKind, Side, is_font, is_image,
+    object_mut, sides_of,
 };
 pub use mutate::is_canvas_color;
 pub use rev::{fresh_id, rev};
 pub use theme::{
-    ACCENT, BACKGROUND, MAX_COLORS, MIN_COLORS, PRESETS, PRIMARY, ROLES, SECONDARY, TEXT, Theme,
+    ACCENT, BACKGROUND, DEFAULT_FONT, FONT_ROLES, Fonts, MAX_COLORS, MIN_COLORS, PRESETS, PRIMARY,
+    PRIMARY_TEXT, ROLES, SECONDARY, TEXT, Theme,
 };
 pub use validate::validate;

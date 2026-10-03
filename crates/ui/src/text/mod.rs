@@ -3,7 +3,9 @@ use bevy::prelude::*;
 use bevy::text::{FontStyle, FontWeight};
 use bevy::transform::TransformSystems;
 use bevy::ui::UiSystems;
-use extboard_core::{ACCENT, BACKGROUND, Node as CanvasNode, NodeKind, PRIMARY, TEXT};
+use extboard_core::{
+    ACCENT, BACKGROUND, Node as CanvasNode, NodeKind, PRIMARY, PRIMARY_TEXT, TEXT,
+};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use bevy::camera::CameraUpdateSystems;
@@ -28,6 +30,40 @@ const GROUP_SIZE: f32 = 16.0;
 // A code block's well: the board behind it, so it reads as a hole in the node.
 const WELL: f32 = 0.5;
 
+// Three because the fourth costs another atlas to buy a difference nobody sees.
+const RASTER_MAX: f32 = 3.0;
+
+// The stretch a tier is allowed to carry before the next one takes over: a fifth
+// over native still reads as sharp, and it keeps the cheap tier over more zoom.
+const RASTER_SLACK: f32 = 1.2;
+
+// Glyphs are rasterized at the size they are laid out at, and a panel is then
+// stretched to the camera's zoom — so a zoomed-in panel is a blown-up bitmap.
+// Laying it out at this multiple instead re-rasterizes it that much sharper;
+// bevy's atlas keeps one set of glyphs per size, so a tier is paid for once.
+#[derive(Resource, PartialEq, Debug)]
+pub struct Raster(pub f32);
+
+impl Default for Raster {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+// Ceil, not round: short of the zoom by more than the slack is a visible stretch.
+fn raster_tier(zoom: f32) -> f32 {
+    (zoom / RASTER_SLACK).ceil().clamp(1.0, RASTER_MAX)
+}
+
+// Frozen while editing: a tier change respawns the panel, and a respawn would
+// reload the editor from the document and drop what has been typed into it.
+fn track_raster(camera: Single<&Projection, With<Camera2d>>, mut raster: ResMut<Raster>) {
+    let Projection::Orthographic(ortho) = *camera else {
+        return;
+    };
+    raster.set_if_neq(Raster(raster_tier(1.0 / ortho.scale)));
+}
+
 // Anything consuming a click before the editors see it orders itself before this.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ReadPress;
@@ -37,6 +73,7 @@ pub struct TextPlugin;
 impl Plugin for TextPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Editing>()
+            .init_resource::<Raster>()
             // Before every Update system that reads the same click, so a frame
             // is either an editing frame or a canvas one, never half of each.
             .add_systems(
@@ -49,15 +86,21 @@ impl Plugin for TextPlugin {
             )
             .add_systems(
                 Update,
-                // `and_then` is lazy, so the changed checks never run before the
-                // document lands: entering edit mode has to rebuild a panel too.
-                (spawn_panels, spawn_label_editor).chain().run_if(
-                    resource_exists::<Document>.and_then(
-                        resource_changed::<Document>
-                            .or_else(resource_changed::<Editing>)
-                            .or_else(resource_changed::<crate::theme::Theme>),
+                (
+                    track_raster.run_if(not(editing)),
+                    // `and_then` is lazy, so the changed checks never run before
+                    // the document lands: entering edit mode has to rebuild a
+                    // panel too.
+                    (spawn_panels, spawn_label_editor).chain().run_if(
+                        resource_exists::<Document>.and_then(
+                            resource_changed::<Document>
+                                .or_else(resource_changed::<Editing>)
+                                .or_else(resource_changed::<Raster>)
+                                .or_else(resource_changed::<crate::theme::Theme>),
+                        ),
                     ),
-                ),
+                )
+                    .chain(),
             )
             // After propagation, or the camera it reads is a frame stale. Before
             // Layout: it writes `Node`.
@@ -218,7 +261,12 @@ fn heading_size(level: HeadingLevel) -> f32 {
     }
 }
 
-pub(super) fn spawn_blocks(blocks: &[Block], theme: &Theme, parent: &mut ChildSpawnerCommands) {
+pub(super) fn spawn_blocks(
+    blocks: &[Block],
+    theme: &Theme,
+    raster: f32,
+    parent: &mut ChildSpawnerCommands,
+) {
     for block in blocks {
         match block {
             Block::Line(spans) => {
@@ -226,12 +274,12 @@ pub(super) fn spawn_blocks(blocks: &[Block], theme: &Theme, parent: &mut ChildSp
                     continue;
                 };
                 parent
-                    .spawn(text_bundle(first, theme))
+                    .spawn(text_bundle(first, theme, raster))
                     .with_children(|parent| {
                         for span in rest {
                             parent.spawn((
                                 TextSpan::new(span.text.clone()),
-                                font(span),
+                                font(span, theme, raster),
                                 TextColor(color(span, theme)),
                             ));
                         }
@@ -241,15 +289,18 @@ pub(super) fn spawn_blocks(blocks: &[Block], theme: &Theme, parent: &mut ChildSp
                 parent
                     .spawn((
                         Node {
-                            padding: UiRect::all(px(8.0)),
-                            border_radius: BorderRadius::all(px(4.0)),
+                            padding: UiRect::all(px(8.0 * raster)),
+                            border_radius: BorderRadius::all(px(4.0 * raster)),
                             ..default()
                         },
                         BackgroundColor(theme.color(BACKGROUND).with_alpha(WELL)),
                     ))
                     .with_child((
                         Text::new(code.clone()),
-                        TextFont::from_font_size(CODE),
+                        TextFont {
+                            font_smoothing: theme.smoothing(),
+                            ..TextFont::from_font_size(CODE)
+                        },
                         TextColor(theme.color(ACCENT)),
                         wrap(),
                     ));
@@ -270,19 +321,23 @@ pub(super) fn spawn_blocks(blocks: &[Block], theme: &Theme, parent: &mut ChildSp
                             parent
                                 .spawn((
                                     Node {
-                                        padding: UiRect::axes(px(8.0), px(4.0)),
-                                        border: UiRect::all(px(1.0)),
+                                        padding: UiRect::axes(px(8.0 * raster), px(4.0 * raster)),
+                                        border: UiRect::all(px(1.0 * raster)),
                                         ..default()
                                     },
                                     BorderColor::all(theme.color(PRIMARY)),
                                 ))
                                 .with_child((
                                     Text::new(cell.text.clone()),
-                                    font(&Span {
-                                        size: CODE,
-                                        bold: cell.head,
-                                        ..default()
-                                    }),
+                                    font(
+                                        &Span {
+                                            size: CODE,
+                                            bold: cell.head,
+                                            ..default()
+                                        },
+                                        theme,
+                                        raster,
+                                    ),
                                     TextColor(theme.color(TEXT)),
                                     wrap(),
                                 ));
@@ -293,10 +348,10 @@ pub(super) fn spawn_blocks(blocks: &[Block], theme: &Theme, parent: &mut ChildSp
     }
 }
 
-fn text_bundle(span: &Span, theme: &Theme) -> (Text, TextFont, TextColor, TextLayout) {
+fn text_bundle(span: &Span, theme: &Theme, raster: f32) -> (Text, TextFont, TextColor, TextLayout) {
     (
         Text::new(span.text.clone()),
-        font(span),
+        font(span, theme, raster),
         TextColor(color(span, theme)),
         wrap(),
     )
@@ -310,11 +365,15 @@ pub(super) fn wrap() -> TextLayout {
     }
 }
 
-fn font(span: &Span) -> TextFont {
+fn font(span: &Span, theme: &Theme, raster: f32) -> TextFont {
     TextFont {
-        // The embedded default font is FiraMono, so `mono` is carried by
-        // colour, not family. A generic FontSource renders nothing here.
-        font: default(),
+        // A code span stays in the embedded font, which is FiraMono: `mono` is
+        // carried by family only when the primary text is not already mono.
+        font: if span.mono {
+            default()
+        } else {
+            theme.text_font(PRIMARY_TEXT)
+        },
         weight: if span.bold {
             FontWeight::BOLD
         } else {
@@ -325,7 +384,8 @@ fn font(span: &Span) -> TextFont {
         } else {
             FontStyle::Normal
         },
-        ..TextFont::from_font_size(span.size)
+        font_smoothing: theme.smoothing(),
+        ..TextFont::from_font_size(span.size * raster)
     }
 }
 

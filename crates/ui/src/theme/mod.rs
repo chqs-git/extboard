@@ -5,9 +5,12 @@ use bevy::prelude::*;
 use bevy::render::RenderApp;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
-use bevy::text::{EditableText, TextCursorStyle, TextEdit};
+use bevy::text::{EditableText, Font, FontCx, FontSmoothing, TextCursorStyle, TextEdit};
 use bevy::ui_widgets::{ControlOrientation, ScrollArea, Scrollbar, ScrollbarThumb};
-use extboard_core::{MAX_COLORS, MIN_COLORS, PRESETS, Theme as Block};
+use extboard_core::{
+    DEFAULT_FONT, FONT_ROLES, Fonts, MAX_COLORS, MIN_COLORS, PRESETS, PRIMARY_TEXT, Theme as Block,
+    is_font,
+};
 
 use crate::client::Document;
 use crate::edit::command;
@@ -15,6 +18,11 @@ use crate::edit::command;
 // A board with no theme at all has to draw as something, and this is the first
 // preset's background: the one colour that exists before the document loads.
 pub const DARK: Color = Color::srgb(0.102, 0.106, 0.149);
+
+// A pixel font is a few hundred glyphs of flat, hinting-free outlines, so the
+// file is tiny; a text face with kerning and a full Unicode range never is. The
+// weight is the classifier, which is why no space has to declare one.
+const PIXEL_BYTES: usize = 75 * 1024;
 
 const LEFT: f32 = 8.0;
 const TOP: f32 = 30.0;
@@ -26,6 +34,8 @@ const LABEL_SIZE: f32 = 11.0;
 // Seven rows of themes shows every preset; both lists scroll past their cap.
 const THEMES_H: f32 = 7.0 * (ROW + 2.0);
 const COLORS_H: f32 = 9.0 * (ROW + 2.0);
+// As many fonts as have been dropped on the board, so this one scrolls too.
+const FONTS_H: f32 = 7.0 * (ROW + 2.0);
 const SCROLLBAR: f32 = 6.0;
 const THUMB_MIN: f32 = 16.0;
 // The naming window, which is the only thing this panel puts over the board.
@@ -52,6 +62,23 @@ pub struct ThemePlugin;
 pub struct Theme {
     pub live: Block,
     saved: Vec<Block>,
+    pub fonts: Fonts,
+    loaded: Vec<Loaded>,
+}
+
+// One font of the library, resolved.
+struct Loaded {
+    // What the canvas calls it: a path in the spaces dir, or a family name.
+    name: String,
+    // The file's weight, once it has landed. A family name has no file, so it
+    // has no weight and is never classified.
+    bytes: Option<usize>,
+    // Held for as long as the entry is, because dropping the last handle
+    // unloads the asset -- and bevy clears the whole font collection when a
+    // font asset goes.
+    file: Option<Handle<Font>>,
+    // The embedded font until the file lands, the family it registers after.
+    source: FontSource,
 }
 
 // What the name in the box points at, which is what a save is allowed to do.
@@ -84,6 +111,11 @@ struct NewName;
 #[derive(Resource, Default)]
 struct Picking(Option<Picked>);
 
+// Which text has its font list open. The two never open together: the panel
+// grows downwards and one tall thing below the sections is enough.
+#[derive(Resource, Default)]
+struct Targeting(Option<usize>);
+
 #[derive(Clone, Copy)]
 struct Picked {
     slot: usize,
@@ -101,10 +133,28 @@ pub(crate) struct ThemePanel {
     slots: usize,
     themes: usize,
     picking: Option<usize>,
+    // Both lists whole: a text row shows the name it points at, so any edit
+    // respawns the panel -- and nothing in this section is typed into.
+    fonts: Fonts,
+    targeting: Option<usize>,
+    // The previews are drawn in the fonts themselves, so a file that has just
+    // landed and been named is a reason to spawn the panel again.
+    named: usize,
 }
 
 #[derive(Component)]
 struct ThemeRow(String);
+
+// A text and its font list: the row opens the list, a row in the list is the
+// font that text takes, and the `-` beside one drops it from the space.
+#[derive(Component)]
+struct TextRow(usize);
+
+#[derive(Component)]
+struct Candidate(String);
+
+#[derive(Component)]
+struct DropFont(String);
 
 #[derive(Component)]
 struct Swatch(usize);
@@ -168,12 +218,17 @@ impl Plugin for ThemePlugin {
             .init_resource::<Open>()
             .init_resource::<Naming>()
             .init_resource::<Picking>()
+            .init_resource::<Targeting>()
             .add_systems(
                 Update,
                 (
                     (resolve, repaint)
                         .chain()
                         .run_if(resource_exists_and_changed::<Document>),
+                    // Not with `resolve`: a file lands frames after the
+                    // document that asked for it. `FontCx` is `TextPlugin`'s,
+                    // so a headless panel has no fonts to name.
+                    name_fonts.run_if(resource_exists::<FontCx>),
                     (toggle, shortcuts, sync, prompt, typed)
                         .chain()
                         .run_if(resource_exists::<Document>),
@@ -196,8 +251,57 @@ impl Theme {
                 name: "test".to_owned(),
                 colors: colors.iter().map(|hex| (*hex).to_owned()).collect(),
             },
-            saved: Vec::new(),
+            ..default()
         }
+    }
+
+    // What a text draws in. The embedded font answers for `DEFAULT_FONT`, for
+    // an unset text, and for a name nothing has loaded.
+    pub fn text_font(&self, role: usize) -> FontSource {
+        self.fonts
+            .font(role)
+            .map(|name| self.source(name))
+            .unwrap_or_default()
+    }
+
+    // Every text on the board is rasterized this way, and the atlas is sampled
+    // to match: `None` is a nearest sampler as well as a hard edge. A pixel font
+    // wants both, and it is classified rather than declared: see `PIXEL_BYTES`.
+    pub fn smoothing(&self) -> FontSmoothing {
+        let pixel = self
+            .fonts
+            .font(PRIMARY_TEXT)
+            .and_then(|name| self.entry(name))
+            .and_then(|loaded| loaded.bytes)
+            .is_some_and(|bytes| bytes < PIXEL_BYTES);
+        match pixel {
+            true => FontSmoothing::None,
+            false => FontSmoothing::AntiAliased,
+        }
+    }
+
+    fn source(&self, name: &str) -> FontSource {
+        self.entry(name)
+            .map(|loaded| loaded.source.clone())
+            .unwrap_or_default()
+    }
+
+    fn entry(&self, name: &str) -> Option<&Loaded> {
+        self.loaded.iter().find(|loaded| loaded.name == name)
+    }
+
+    // A file still on its way, which `name_fonts` is waiting to name.
+    fn pending(&self) -> bool {
+        self.loaded.iter().any(Loaded::pending)
+    }
+
+    // How many of the library's fonts have a font behind them, which is what
+    // tells the panel a preview has something new to draw with.
+    fn resolved(&self) -> usize {
+        self.loaded
+            .iter()
+            .filter(|loaded| !loaded.pending())
+            .count()
     }
 
     fn rows(&self) -> Vec<Block> {
@@ -245,11 +349,89 @@ pub fn hex(color: &str) -> Option<Color> {
     ))
 }
 
-fn resolve(document: Res<Document>, mut theme: ResMut<Theme>) {
+fn resolve(document: Res<Document>, assets: Res<AssetServer>, mut theme: ResMut<Theme>) {
     let (live, saved) = (document.0.theme(), document.0.themes());
     if (&theme.live, &theme.saved) != (&live, &saved) {
         (theme.live, theme.saved) = (live, saved);
     }
+    let fonts = document.0.fonts();
+    if theme.fonts != fonts {
+        theme.loaded = fonts
+            .library
+            .iter()
+            .map(|name| load(name, &assets))
+            .collect();
+        theme.fonts = fonts;
+    }
+}
+
+// A file in the spaces dir is loaded as an asset; anything else is the name of
+// a family the system may have.
+fn load(name: &str, assets: &AssetServer) -> Loaded {
+    match name {
+        file if is_font(file) => Loaded {
+            name: name.to_owned(),
+            bytes: None,
+            file: Some(assets.load(file.to_owned())),
+            // The embedded font until it lands: a handle for an asset that has
+            // not arrived draws nothing at all.
+            source: FontSource::default(),
+        },
+        family => Loaded {
+            name: name.to_owned(),
+            bytes: None,
+            file: None,
+            source: match family {
+                "" | DEFAULT_FONT => FontSource::default(),
+                family => FontSource::from(family),
+            },
+        },
+    }
+}
+
+impl Loaded {
+    fn pending(&self) -> bool {
+        self.file.is_some() && !matches!(self.source, FontSource::Family(_))
+    }
+}
+
+// The board is given the family a font file registers, never the handle to it.
+// A `Handle` resolves through the asset's alias, and a reload of the file --
+// which the dev build's watcher fires for the `.ttf` a drop has just written
+// into the spaces dir -- replaces the asset with one whose alias is empty.
+// Bevy never re-registers an id it has already seen, so that text falls back to
+// the default font for good. A family name has nothing to go stale.
+fn name_fonts(assets: Res<Assets<Font>>, mut font_cx: ResMut<FontCx>, mut theme: ResMut<Theme>) {
+    if !theme.pending() {
+        return;
+    }
+    let named: Vec<(usize, String, usize)> = theme
+        .loaded
+        .iter()
+        .enumerate()
+        .filter(|(_, loaded)| loaded.pending())
+        .filter_map(|(slot, loaded)| {
+            let font = assets.get(loaded.file.as_ref()?.id())?;
+            Some((slot, family_of(&mut font_cx, font)?, font.data.len()))
+        })
+        .collect();
+    // Only once something has a name: this runs every frame until it does, and
+    // waking the resource respawns every panel on the board.
+    for (slot, family, bytes) in named {
+        theme.loaded[slot].source = FontSource::from(family.as_str());
+        theme.loaded[slot].bytes = Some(bytes);
+    }
+}
+
+// Registering a blob the collection already holds answers the same family, so
+// this both learns the name and puts back a registration a reload lost.
+fn family_of(font_cx: &mut FontCx, font: &Font) -> Option<String> {
+    let (family, _) = font_cx
+        .collection
+        .register_fonts(font.data.clone(), None)
+        .into_iter()
+        .next()?;
+    font_cx.collection.family_name(family).map(str::to_owned)
 }
 
 fn repaint(theme: Res<Theme>, mut clear: ResMut<ClearColor>) {
@@ -259,10 +441,16 @@ fn repaint(theme: Res<Theme>, mut clear: ResMut<ClearColor>) {
     }
 }
 
-fn toggle(keys: Res<ButtonInput<KeyCode>>, mut open: ResMut<Open>, mut picking: ResMut<Picking>) {
+fn toggle(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut open: ResMut<Open>,
+    mut picking: ResMut<Picking>,
+    mut targeting: ResMut<Targeting>,
+) {
     if command(&keys) && keys.just_pressed(KeyCode::KeyT) {
         open.0 = !open.0;
         picking.0 = None;
+        targeting.0 = None;
     }
 }
 
@@ -287,6 +475,12 @@ fn write(document: &mut ResMut<Document>, theme: &Block) {
     }
 }
 
+pub(crate) fn write_fonts(document: &mut ResMut<Document>, fonts: &Fonts) {
+    if &document.0.fonts() != fonts {
+        document.0.set_fonts(fonts);
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "a system's arguments are its query"
@@ -296,6 +490,7 @@ fn sync(
     open: Res<Open>,
     theme: Res<Theme>,
     picking: Res<Picking>,
+    targeting: Res<Targeting>,
     focus: Res<InputFocus>,
     panels: Query<(Entity, &ThemePanel)>,
     mut swatches: Query<(&Swatch, &mut BackgroundColor)>,
@@ -313,6 +508,9 @@ fn sync(
         slots: theme.live.colors.len(),
         themes: theme.saved.len(),
         picking: picking.0.map(|open| open.slot),
+        fonts: theme.fonts.clone(),
+        targeting: targeting.0,
+        named: theme.resolved(),
     };
     match (open.0, panels.single().ok()) {
         (false, Some((entity, _))) => commands.entity(entity).despawn(),
@@ -393,6 +591,7 @@ fn spawn(
 ) {
     let block = theme.live.clone();
     let open = picking.0;
+    let targeting = panel.targeting;
     commands
         .spawn((
             panel,
@@ -423,7 +622,7 @@ fn spawn(
                         .spawn((
                             ThemeRow(saved.name.clone()),
                             row(),
-                            BackgroundColor(if on { ROW_ON } else { Color::NONE }),
+                            BackgroundColor(row_bg(on)),
                             children![tag(&saved.name, FG)],
                         ))
                         .observe(select_theme);
@@ -438,6 +637,11 @@ fn spawn(
             });
             buttons(parent, theme);
 
+            parent.spawn((heading("text"), TextColor(LABEL)));
+            for role in 0..FONT_ROLES.len() {
+                text_row(parent, theme, role, targeting);
+            }
+
             // Below both lists rather than inside the one that scrolls: a dial
             // half off the top of a scroll box is a dial you cannot aim at.
             if let Some(open) = open.filter(|open| open.slot < block.colors.len()) {
@@ -447,6 +651,9 @@ fn spawn(
                 ));
                 let color = hex(block.color(open.slot).unwrap_or_default()).unwrap_or(DARK);
                 picker(parent, materials, color, open.hue);
+            }
+            if let Some(role) = targeting {
+                candidates(parent, theme, role);
             }
         });
 }
@@ -587,6 +794,163 @@ fn color_row(parent: &mut ChildSpawnerCommands, theme: &Block, slot: usize) {
                 },
             ));
         });
+}
+
+// The three texts. Pressing one unfolds its font list below the sections, in
+// the same place and for the same reason the colour picker opens there.
+fn text_row(parent: &mut ChildSpawnerCommands, theme: &Theme, role: usize, open: Option<usize>) {
+    parent
+        .spawn((
+            TextRow(role),
+            row(),
+            BackgroundColor(row_bg(open == Some(role))),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Node {
+                    flex_grow: 1.0,
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+                children![tag(FONT_ROLES[role], LABEL)],
+            ));
+            parent.spawn(font_tag(theme, theme.fonts.font(role)));
+        })
+        .observe(open_targets);
+}
+
+// What one text may draw in: the embedded font, the space's own, and -- for the
+// two that nothing reads yet -- nothing. The primary text has no `none`,
+// because every node's text follows it.
+fn candidates(parent: &mut ChildSpawnerCommands, theme: &Theme, role: usize) {
+    let chosen = theme.fonts.font(role);
+    parent.spawn((heading(FONT_ROLES[role]), TextColor(FG)));
+    list(parent, FONTS_H, |parent| {
+        let library = theme.fonts.library.iter().map(String::as_str);
+        for name in std::iter::once(DEFAULT_FONT).chain(library) {
+            // The `-` is a sibling of the row and not a child of it: a press
+            // bubbles to its parent, and dropping a font is not choosing it.
+            parent
+                .spawn(Node {
+                    column_gap: px(4.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                })
+                .with_children(|parent| {
+                    parent
+                        .spawn((
+                            Candidate(name.to_owned()),
+                            Node {
+                                flex_grow: 1.0,
+                                overflow: Overflow::clip(),
+                                ..row()
+                            },
+                            BackgroundColor(row_bg(chosen == Some(name))),
+                            children![font_tag(theme, Some(name))],
+                        ))
+                        .observe(pick_font);
+                    if name != DEFAULT_FONT {
+                        parent
+                            .spawn((
+                                DropFont(name.to_owned()),
+                                Node {
+                                    padding: UiRect::horizontal(px(5.0)),
+                                    align_items: AlignItems::Center,
+                                    ..default()
+                                },
+                                children![tag("\u{2212}", LABEL)],
+                            ))
+                            .observe(remove_font);
+                    }
+                });
+        }
+        if role != PRIMARY_TEXT {
+            parent
+                .spawn((
+                    Candidate(String::new()),
+                    row(),
+                    BackgroundColor(row_bg(chosen.is_none())),
+                    children![font_tag(theme, None)],
+                ))
+                .observe(pick_font);
+        }
+    });
+}
+
+fn row_bg(on: bool) -> Color {
+    if on { ROW_ON } else { Color::NONE }
+}
+
+// Drawn in the font it names, which is the only preview a font needs.
+fn font_tag(theme: &Theme, name: Option<&str>) -> impl Bundle {
+    let (shown, color) = match name {
+        Some(name) => (font_label(name), FG),
+        None => ("none", LABEL),
+    };
+    (
+        Text::new(shown.to_owned()),
+        TextFont {
+            font: name.map(|name| theme.source(name)).unwrap_or_default(),
+            ..TextFont::from_font_size(LABEL_SIZE)
+        },
+        TextColor(color),
+    )
+}
+
+// The library holds a path and the row is 236px wide, so a row shows the file
+// and not the folder it is in. A family name has neither and comes through.
+fn font_label(name: &str) -> &str {
+    let file = name.rsplit('/').next().unwrap_or(name);
+    file.rsplit_once('.').map_or(file, |(stem, _)| stem)
+}
+
+// One list at a time: the picker and this both open below the sections.
+fn open_targets(
+    press: On<Pointer<Press>>,
+    rows: Query<&TextRow>,
+    mut targeting: ResMut<Targeting>,
+    mut picking: ResMut<Picking>,
+) {
+    let Ok(row) = rows.get(press.entity) else {
+        return;
+    };
+    targeting.0 = match targeting.0 {
+        Some(open) if open == row.0 => None,
+        _ => Some(row.0),
+    };
+    picking.0 = None;
+}
+
+fn pick_font(
+    press: On<Pointer<Press>>,
+    rows: Query<&Candidate>,
+    theme: Res<Theme>,
+    mut targeting: ResMut<Targeting>,
+    mut document: ResMut<Document>,
+) {
+    let (Ok(row), Some(role)) = (rows.get(press.entity), targeting.0) else {
+        return;
+    };
+    let mut fonts = theme.fonts.clone();
+    fonts.set(role, &row.0);
+    write_fonts(&mut document, &fonts);
+    targeting.0 = None;
+}
+
+// The file stays in the spaces dir: nothing here deletes from it, and a space
+// that drops a font keeps it a drop away.
+fn remove_font(
+    press: On<Pointer<Press>>,
+    rows: Query<&DropFont>,
+    theme: Res<Theme>,
+    mut document: ResMut<Document>,
+) {
+    let Ok(row) = rows.get(press.entity) else {
+        return;
+    };
+    let mut fonts = theme.fonts.clone();
+    fonts.remove(&row.0);
+    write_fonts(&mut document, &fonts);
 }
 
 // `MaterialNode`s, so the gradient is the GPU's rather than a grid of entities.
@@ -877,10 +1241,12 @@ fn open_picker(
     swatches: Query<&Swatch>,
     theme: Res<Theme>,
     mut picking: ResMut<Picking>,
+    mut targeting: ResMut<Targeting>,
 ) {
     let Ok(swatch) = swatches.get(press.entity) else {
         return;
     };
+    targeting.0 = None;
     picking.0 = match picking.0 {
         Some(open) if open.slot == swatch.0 => None,
         _ => Some(Picked {

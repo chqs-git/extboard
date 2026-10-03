@@ -131,7 +131,7 @@ pub(super) fn release_field(
 
 // Source while editing, rendered at rest: the buffer is the node's raw markdown,
 // and the styled span tree is never edited.
-pub(super) fn editor(md: &str, fg: Color) -> impl Bundle {
+pub(super) fn editor(md: &str, fg: Color, raster: f32) -> impl Bundle {
     let mut buffer = EditableText {
         allow_newlines: true,
         // The node's own height, not a line count.
@@ -156,7 +156,7 @@ pub(super) fn editor(md: &str, fg: Color) -> impl Bundle {
             linebreak: LineBreak::WordOrCharacter,
             ..default()
         },
-        TextFont::from_font_size(BODY),
+        TextFont::from_font_size(BODY * raster),
         TextColor(fg),
         // The default caret is slate, which on a coloured node rect is invisible.
         TextCursorStyle {
