@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use extboard_core::{Node as CanvasNode, NodeKind, TEXT, is_image, sides_inset};
+use extboard_core::{Node as CanvasNode, NodeKind, PRIMARY_TEXT, TEXT, is_image, sides_inset};
 use std::collections::HashMap;
 
 use crate::camera::world_to_screen;
@@ -10,7 +10,7 @@ use crate::shape::{Palette, PolygonMaterial, paint};
 use crate::theme::Theme;
 
 use super::edit_text::{Editing, editor, label_editor};
-use super::{GROUP_SIZE, PADDING, ROW_GAP, blocks, markdown, spawn_blocks, wrap};
+use super::{GROUP_SIZE, PADDING, ROW_GAP, Raster, blocks, markdown, spawn_blocks, wrap};
 
 const OUTLINE_PX: f32 = 2.0;
 
@@ -34,6 +34,7 @@ pub(super) fn spawn_panels(
     document: Res<Document>,
     editing: Res<Editing>,
     theme: Res<Theme>,
+    raster: Res<Raster>,
     assets: Res<AssetServer>,
     mut palette: ResMut<Palette>,
     mut materials: ResMut<Assets<PolygonMaterial>>,
@@ -43,8 +44,12 @@ pub(super) fn spawn_panels(
         commands.entity(entity).despawn();
     }
 
+    let raster = raster.0;
     for (rank, node) in back_to_front(&document.0.nodes).iter().enumerate() {
         let size = Vec2::new(node.width as f32, node.height as f32);
+        // The content is laid out `raster` times too big and scaled back down by
+        // the same factor, so its glyphs are rasterized at that resolution.
+        let box_size = size * raster;
         commands
             .spawn((
                 Panel(node.id.clone()),
@@ -70,15 +75,17 @@ pub(super) fn spawn_panels(
                             position_type: PositionType::Absolute,
                             left: px(0.0),
                             top: px(0.0),
-                            width: px(size.x),
-                            height: px(size.y),
-                            padding: content_padding(node.sides, size),
+                            width: px(box_size.x),
+                            height: px(box_size.y),
+                            padding: content_padding(node.sides, size, raster),
                             flex_direction: FlexDirection::Column,
-                            row_gap: px(ROW_GAP),
+                            row_gap: px(ROW_GAP * raster),
                             ..default()
                         },
                     ))
-                    .with_children(|parent| inside(node, &editing, &theme, &assets, parent));
+                    .with_children(|parent| {
+                        inside(node, &editing, &theme, &assets, raster, parent)
+                    });
             });
     }
 }
@@ -96,14 +103,15 @@ fn inside(
     editing: &Editing,
     theme: &Theme,
     assets: &AssetServer,
+    raster: f32,
     parent: &mut ChildSpawnerCommands,
 ) {
     let open = editing.node() == Some(node.id.as_str());
     match (&node.kind, markdown(node)) {
         (_, Some(md)) if open => {
-            parent.spawn(editor(md, theme.color(TEXT)));
+            parent.spawn(editor(md, theme.color(TEXT), raster));
         }
-        (_, Some(md)) => spawn_blocks(&blocks(md), theme, parent),
+        (_, Some(md)) => spawn_blocks(&blocks(md), theme, raster, parent),
         // The file is a path in the spaces dir, which is the asset root.
         (NodeKind::File { file, .. }, _) if is_image(file) => {
             parent.spawn((
@@ -117,7 +125,11 @@ fn inside(
         (NodeKind::Group { label: Some(label) }, _) => {
             parent.spawn((
                 Text::new(label.clone()),
-                TextFont::from_font_size(GROUP_SIZE),
+                TextFont {
+                    font: theme.text_font(PRIMARY_TEXT),
+                    font_smoothing: theme.smoothing(),
+                    ..TextFont::from_font_size(GROUP_SIZE * raster)
+                },
                 TextColor(theme.color(TEXT)),
                 wrap(),
             ));
@@ -126,9 +138,12 @@ fn inside(
     }
 }
 
-fn content_padding(sides: Option<u8>, size: Vec2) -> UiRect {
+fn content_padding(sides: Option<u8>, size: Vec2, raster: f32) -> UiRect {
     let inset = sides_inset(sides);
-    UiRect::axes(px(PADDING + inset * size.x), px(PADDING + inset * size.y))
+    UiRect::axes(
+        px((PADDING + inset * size.x) * raster),
+        px((PADDING + inset * size.y) * raster),
+    )
 }
 
 // Outside any panel: a fixed screen-sized box on an edge, not a node's body.
@@ -158,6 +173,7 @@ pub(super) fn track_panels(
     document: Res<Document>,
     nodes: Query<(&NodeId, &Transform, &NodeRect)>,
     theme: Res<Theme>,
+    raster: Res<Raster>,
     mut palette: ResMut<Palette>,
     mut materials: ResMut<Assets<PolygonMaterial>>,
     mut panels: Query<(&Panel, &mut Node, &mut MaterialNode<PolygonMaterial>)>,
@@ -217,13 +233,16 @@ pub(super) fn track_panels(
             continue;
         };
         let sides = current.get(content.0.as_str()).and_then(|node| node.sides);
-        let want = content_padding(sides, size);
+        let want = content_padding(sides, size, raster.0);
         if node.padding != want {
             node.padding = want;
         }
-        let offset = centre_scale_offset(size, zoom);
+        // The box is already `raster` times too big, so it needs that much less
+        // scale to reach the camera's zoom.
+        let scale = zoom / raster.0;
+        let offset = centre_scale_offset(size * raster.0, scale);
         let want = UiTransform {
-            scale: Vec2::splat(zoom),
+            scale: Vec2::splat(scale),
             translation: Val2::px(offset.x, offset.y),
             ..UiTransform::IDENTITY
         };

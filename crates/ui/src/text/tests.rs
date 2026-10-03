@@ -230,3 +230,25 @@ fn a_link_and_a_code_span_are_the_themes_rather_than_fixed_colours() {
     assert_eq!(mono, theme.color(ACCENT));
     assert_eq!([body, link, mono].map(|c| c.alpha()), [1.0; 3]);
 }
+
+// The tier only trades layout size for transform scale: the glyphs are
+// rasterized bigger, and the box they land in is the one zoom alone would give.
+#[test]
+fn a_raster_tier_never_undersamples_or_resizes_the_content() {
+    let size = Vec2::new(740.0, 460.0);
+    for zoom in [0.25, 1.0, 1.1, 2.0, 2.6, 8.0] {
+        let tier = raster_tier(zoom);
+        assert!(
+            tier * RASTER_SLACK >= zoom.min(RASTER_MAX) && tier <= RASTER_MAX,
+            "zoom {zoom}: tier {tier}"
+        );
+        let scale = zoom / tier;
+        let on_screen = size * tier * scale;
+        assert!(
+            (on_screen - size * zoom).abs().max_element() < 1e-3,
+            "{on_screen}"
+        );
+        let corner = content_top_left(size * tier, scale);
+        assert!(corner.abs().max_element() < 1e-3, "zoom {zoom}: {corner}");
+    }
+}

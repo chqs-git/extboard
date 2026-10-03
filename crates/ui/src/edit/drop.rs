@@ -1,11 +1,12 @@
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 use bevy::window::FileDragAndDrop;
-use extboard_core::{NodeKind, is_image};
+use extboard_core::{NodeKind, PRIMARY_TEXT, is_font, is_image};
 use std::path::{Path, PathBuf};
 
 use crate::client::{Document, files_root};
 use crate::select::cursor_world;
+use crate::theme::write_fonts;
 
 use super::added;
 
@@ -14,6 +15,7 @@ const DROP_SIZE: Vec2 = Vec2::new(320.0, 240.0);
 const CAPTION_SIZE: Vec2 = Vec2::new(320.0, 60.0);
 // Under the spaces dir, which is both what extd serves and the asset root.
 const IMAGES: &str = "images";
+const FONTS: &str = "fonts";
 
 pub(super) fn dropped(
     mut dropped: MessageReader<FileDragAndDrop>,
@@ -26,14 +28,19 @@ pub(super) fn dropped(
         let FileDragAndDrop::DroppedFile { path_buf, .. } = event else {
             continue;
         };
-        if !is_image(&path_buf.to_string_lossy()) {
+        let name = path_buf.to_string_lossy().into_owned();
+        if is_font(&name) {
+            add_font(path_buf, &mut document);
+            continue;
+        }
+        if !is_image(&name) {
             warn!(
-                "{} is not an image, so nothing was added",
+                "{} is neither an image nor a font, so nothing was added",
                 path_buf.display()
             );
             continue;
         }
-        let Some(file) = copy_in(path_buf) else {
+        let Some(file) = copy_in(path_buf, IMAGES) else {
             continue;
         };
 
@@ -65,10 +72,23 @@ pub(super) fn dropped(
     }
 }
 
+// A font is the space's, not a node's: it lands in the library and takes the
+// primary text, because every text on the board follows that one -- a drop you
+// cannot see is a drop that did not work.
+fn add_font(from: &Path, document: &mut ResMut<Document>) {
+    let Some(file) = copy_in(from, FONTS) else {
+        return;
+    };
+    let mut fonts = document.0.fonts();
+    fonts.add(&file);
+    fonts.set(PRIMARY_TEXT, &file);
+    write_fonts(document, &fonts);
+}
+
 // Into the spaces dir, because that is the one directory extd serves and the
 // one the app resolves a node's path against. The node keeps the relative path.
-fn copy_in(from: &Path) -> Option<String> {
-    let dir = PathBuf::from(files_root()).join(IMAGES);
+fn copy_in(from: &Path, into: &str) -> Option<String> {
+    let dir = PathBuf::from(files_root()).join(into);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         error!("{}: {e}", dir.display());
         return None;
@@ -78,7 +98,7 @@ fn copy_in(from: &Path) -> Option<String> {
         error!("{} -> {}: {e}", from.display(), dir.display());
         return None;
     }
-    Some(format!("{IMAGES}/{name}"))
+    Some(format!("{into}/{name}"))
 }
 
 // Never overwrite: two different photos both called `IMG_0001.jpg` have to land.

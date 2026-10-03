@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy::text::TextLayoutInfo;
-use extboard_core::{End, SECONDARY, TEXT};
+use extboard_core::{End, PRIMARY_TEXT, SECONDARY, TEXT};
 use std::collections::HashMap;
 
 use crate::client::Document;
@@ -99,7 +99,11 @@ fn spawn_edges(
         if let Some(label) = &edge.label {
             spawned.insert((
                 Text2d::new(label.clone()),
-                TextFont::from_font_size(LABEL_SIZE),
+                TextFont {
+                    font: theme.text_font(PRIMARY_TEXT),
+                    font_smoothing: theme.smoothing(),
+                    ..TextFont::from_font_size(LABEL_SIZE)
+                },
                 TextColor(theme.color(TEXT)),
             ));
         }

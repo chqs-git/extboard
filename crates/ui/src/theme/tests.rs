@@ -5,10 +5,30 @@ fn canvas() -> Canvas {
     serde_json::from_str(r#"{"nodes":[],"edges":[]}"#).expect("fixture")
 }
 
-// `AssetPlugin` because the panel's shader is an embedded asset.
+// `AssetPlugin` because the panel's shader is an embedded asset, `Font` because
+// a loaded font is an asset too, and the task pool because loading one reads a
+// file. `DefaultPlugins` brings all three for real.
 fn app() -> App {
+    rooted(AssetPlugin::default())
+}
+
+// A real asset root, for the one test that loads a real font off the disk.
+fn app_rooted(dir: &std::path::Path) -> App {
+    rooted(AssetPlugin {
+        file_path: dir.to_string_lossy().into_owned(),
+        meta_check: bevy::asset::AssetMetaCheck::Never,
+        ..default()
+    })
+}
+
+fn rooted(assets: AssetPlugin) -> App {
     let mut app = App::new();
-    app.add_plugins((AssetPlugin::default(), ThemePlugin))
+    app.add_plugins((TaskPoolPlugin::default(), assets, ThemePlugin))
+        .init_asset::<bevy::text::Font>()
+        // `TextPlugin`'s, both: without the loader a `.ttf` never arrives, and
+        // without `FontCx` nothing can name it.
+        .register_asset_loader(bevy::text::FontLoader)
+        .init_resource::<bevy::text::FontCx>()
         .init_resource::<InputFocus>()
         .init_resource::<ClearColor>()
         .init_resource::<ButtonInput<KeyCode>>()
@@ -408,4 +428,157 @@ fn every_button_reads_what_it_would_do() {
     }
     assert_eq!(read(&app, Button::Drop).1, LABEL);
     assert_eq!(read(&app, Button::Add).1, FG);
+}
+
+// A row has 236px and a library holds paths.
+#[test]
+fn a_font_row_shows_the_file_and_not_the_folder_it_is_in() {
+    assert_eq!(font_label("fonts/Inter.ttf"), "Inter");
+    assert_eq!(font_label("fonts/Fira Code.otf"), "Fira Code");
+    // A family name has neither a folder nor an extension.
+    assert_eq!(font_label("Menlo"), "Menlo");
+    assert_eq!(font_label(DEFAULT_FONT), DEFAULT_FONT);
+    assert_eq!(font_label(""), "");
+}
+
+// A file is held as an asset and spent as a family; a name is the system's.
+#[test]
+fn a_font_file_is_held_as_an_asset_and_anything_else_is_a_family() {
+    let mut app = app();
+    let assets = app.world_mut().resource::<AssetServer>().clone();
+
+    let file = load("fonts/Inter.ttf", &assets);
+    assert!(file.file.is_some(), "the asset is held, or it unloads");
+    assert!(file.pending(), "and it has no family until it lands");
+    // Never the handle: a handle for an asset still on its way draws nothing.
+    assert_eq!(file.source, FontSource::default());
+
+    let family = load("Menlo", &assets);
+    assert!(family.file.is_none());
+    assert!(!family.pending());
+    assert_eq!(family.source, FontSource::from("Menlo"));
+
+    for embedded in ["", DEFAULT_FONT] {
+        assert_eq!(load(embedded, &assets).source, FontSource::default());
+    }
+}
+
+// The bug behind E8's fonts: a `FontSource::Handle` is resolved through the
+// asset's alias, and the dev build's file watcher fires for the `.ttf` a drop
+// has just written -- replacing the asset with one whose alias is empty, which
+// bevy never fills in again. The family name is what survives that.
+#[test]
+fn a_font_file_is_spent_as_the_family_it_registers() {
+    // The embedded font's bytes under a name of our own: a family lives in the
+    // file and not in the file name, which is the whole point of the fix.
+    let dir = std::env::temp_dir().join("extboard-font-test");
+    std::fs::create_dir_all(dir.join("fonts")).unwrap();
+    std::fs::write(dir.join("fonts/dropped.ttf"), bevy::text::DEFAULT_FONT_DATA).unwrap();
+
+    let mut app = app_rooted(&dir);
+    let mut fonts = Fonts::default();
+    fonts.add("fonts/dropped.ttf");
+    fonts.set(PRIMARY_TEXT, "fonts/dropped.ttf");
+    app.world_mut()
+        .resource_mut::<Document>()
+        .0
+        .set_fonts(&fonts);
+
+    // The file is read off a task pool thread, so this is a wait, not a frame.
+    for _ in 0..200 {
+        app.update();
+        if !app.world().resource::<Theme>().pending() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(
+        app.world().resource::<Theme>().text_font(PRIMARY_TEXT),
+        FontSource::from("Fira Mono"),
+        "the family the file carries, not the asset it arrived as"
+    );
+    // That the weight reaches the classifier at all, off a real file. This
+    // fixture is bevy's *subset* FiraMono, light enough to read as a pixel font.
+    assert_eq!(
+        app.world().resource::<Theme>().smoothing(),
+        FontSmoothing::None
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// Every text on the board follows the primary one, and that one is the
+// embedded font until a space says otherwise.
+#[test]
+fn the_primary_text_is_the_embedded_font_until_a_font_is_loaded() {
+    let mut app = app();
+    app.world_mut().run_schedule(Update);
+    let font = |app: &App| app.world().resource::<Theme>().text_font(PRIMARY_TEXT);
+    assert_eq!(font(&app), FontSource::default());
+
+    let mut fonts = Fonts::default();
+    fonts.add("fonts/Inter.ttf");
+    fonts.set(PRIMARY_TEXT, "fonts/Inter.ttf");
+    app.world_mut()
+        .resource_mut::<Document>()
+        .0
+        .set_fonts(&fonts);
+    app.world_mut().run_schedule(Update);
+    assert!(matches!(font(&app), FontSource::Handle(_)));
+    // And the two nothing reads yet stay unset.
+    assert_eq!(
+        app.world().resource::<Theme>().text_font(1),
+        FontSource::default()
+    );
+}
+
+// Three rows, never more and never fewer: a text cannot be added or removed.
+#[test]
+fn the_panel_shows_three_texts_and_one_list_at_a_time() {
+    let mut app = opened();
+    let count = |app: &mut App| {
+        (
+            app.world_mut().query::<&TextRow>().iter(app.world()).len(),
+            app.world_mut()
+                .query::<&Candidate>()
+                .iter(app.world())
+                .len(),
+        )
+    };
+    assert_eq!(count(&mut app), (FONT_ROLES.len(), 0));
+
+    // The secondary text: the embedded font, and `none`.
+    app.world_mut().resource_mut::<Targeting>().0 = Some(1);
+    app.world_mut().run_schedule(Update);
+    assert_eq!(count(&mut app), (FONT_ROLES.len(), 2));
+
+    // The primary text has no `none`, because every node's text follows it.
+    app.world_mut().resource_mut::<Targeting>().0 = Some(PRIMARY_TEXT);
+    app.world_mut().run_schedule(Update);
+    assert_eq!(count(&mut app), (FONT_ROLES.len(), 1));
+}
+
+// A pixel font needs no grey edge and a nearest sampler on the atlas behind it,
+// which is what `FontSmoothing::None` carries -- and the file's weight is what
+// says the primary text is one. The threshold is the only interesting line.
+#[test]
+fn a_light_enough_font_file_is_a_pixel_font_and_stops_the_smoothing() {
+    let mut theme = Theme::default();
+    assert_eq!(theme.smoothing(), FontSmoothing::AntiAliased);
+
+    theme.fonts.add("fonts/tiny.ttf");
+    theme.fonts.set(PRIMARY_TEXT, "fonts/tiny.ttf");
+    theme.loaded = vec![Loaded {
+        name: "fonts/tiny.ttf".to_owned(),
+        bytes: None,
+        file: None,
+        source: FontSource::from("Tiny"),
+    }];
+    // Still on its way: nothing to weigh, so nothing to classify.
+    assert_eq!(theme.smoothing(), FontSmoothing::AntiAliased);
+
+    theme.loaded[0].bytes = Some(PIXEL_BYTES - 1);
+    assert_eq!(theme.smoothing(), FontSmoothing::None);
+    theme.loaded[0].bytes = Some(PIXEL_BYTES);
+    assert_eq!(theme.smoothing(), FontSmoothing::AntiAliased);
 }

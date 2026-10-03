@@ -111,6 +111,12 @@ pub fn is_image(file: &str) -> bool {
         .any(|ext| lower.ends_with(ext))
 }
 
+// The two bevy's font loader reads, and so the two a drop may add.
+pub fn is_font(file: &str) -> bool {
+    let lower = file.to_ascii_lowercase();
+    [".ttf", ".otf"].iter().any(|ext| lower.ends_with(ext))
+}
+
 pub const MIN_SIDES: u8 = 3;
 pub const CIRCLE_SIDES: u8 = 10;
 
