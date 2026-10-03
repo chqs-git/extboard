@@ -148,6 +148,19 @@ pub enum End {
     Arrow,
 }
 
+// A nested object in the extras, made if absent and replaced if it is not one.
+// Every write to one of our own keys goes through here, so a hand-written file
+// that put a string where we keep a block is overwritten rather than panicked on.
+pub fn object_mut<'a>(extra: &'a mut Map<String, Value>, key: &str) -> &'a mut Map<String, Value> {
+    let slot = extra
+        .entry(key)
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !slot.is_object() {
+        *slot = Value::Object(Map::new());
+    }
+    slot.as_object_mut().expect("an object either way")
+}
+
 impl Canvas {
     // serialize into bytes
     pub fn canonical_bytes(&self) -> Vec<u8> {

@@ -53,7 +53,11 @@ impl Plugin for SelectPlugin {
             .add_systems(
                 Update,
                 (
-                    press.run_if(not(crate::text::editing).and_then(not(crate::shape::over_panel))),
+                    press.run_if(
+                        not(crate::text::editing)
+                            .and_then(not(crate::shape::over_panel))
+                            .and_then(not(crate::theme::over_panel)),
+                    ),
                     drag_band,
                     release,
                 )

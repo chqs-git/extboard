@@ -2,10 +2,12 @@
 
 struct Polygon {
     color: vec4<f32>,
+    outline: vec4<f32>,
+    size: vec2<f32>,
     sides: f32,
 #ifdef SIXTEEN_BYTE_ALIGNMENT
     // WebGL2 wants the struct rounded up to sixteen bytes.
-    _webgl2_padding: vec3<f32>,
+    _webgl2_padding: f32,
 #endif
 }
 
@@ -15,6 +17,8 @@ var<uniform> polygon: Polygon;
 const TAU: f32 = 6.2831855;
 const UP: f32 = 1.5707964;
 const CIRCLE: f32 = 10.0;
+// The outline thickness
+const EDGE: f32 = 2.0;
 
 // The same vertices `extboard_core::sides_polygon` computes, and they have to
 // stay the same: the phone view clips from that one.
@@ -25,8 +29,7 @@ fn rim(i: f32, sides: f32) -> vec2<f32> {
     return vec2<f32>(cos(angle), -sin(angle));
 }
 
-// How far outside the polygon a point is: the furthest past any one edge,
-// which for a convex shape is the distance to the shape itself.
+// The furthest past any one edge, which for a convex shape is the distance.
 fn outside(point: vec2<f32>, sides: f32, size: vec2<f32>) -> f32 {
     // Fitted end to end, the same fit core does, so four sides is the box.
     var low = vec2<f32>(1.0, 1.0);
@@ -66,5 +69,11 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
     // One pixel of fade: the panel is sized in screen pixels.
     let fade = max(fwidth(past), 0.0001);
     let mask = 1.0 - smoothstep(-fade, fade, past);
-    return vec4<f32>(polygon.color.rgb, polygon.color.a * mask);
+    // The laid-out box is the node's size times the zoom, so their ratio is it.
+    let zoom = in.size.x / max(polygon.size.x, 0.0001);
+    let edge = max(EDGE * zoom, fade);
+    // Inset: an outline outside the shape is clipped by the panel box.
+    let band = smoothstep(-edge - fade, -edge + fade, past);
+    let paint = mix(polygon.color, polygon.outline, band);
+    return vec4<f32>(paint.rgb, paint.a * mask);
 }

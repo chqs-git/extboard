@@ -5,7 +5,8 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 use extboard_core::Node as CanvasNode;
 
-use crate::node::body_color;
+use crate::node::{body_color, outline_color};
+use crate::theme::Theme;
 
 use super::RECT_SIDES;
 
@@ -20,6 +21,9 @@ pub struct PolygonMaterial {
 #[derive(ShaderType, Clone, Debug)]
 struct Paint {
     color: Vec4,
+    outline: Vec4,
+    // Canvas units; the laid-out box is this times the zoom.
+    size: Vec2,
     sides: f32,
 }
 
@@ -31,9 +35,11 @@ impl UiMaterial for PolygonMaterial {
     }
 }
 
+type Look = (u8, [u32; 4], [u32; 4], [u32; 2]);
+
 // One per look, not per node: the UI batches what shares a handle.
 #[derive(Resource, Default)]
-pub struct Palette(HashMap<(u8, [u32; 4]), Handle<PolygonMaterial>>);
+pub struct Palette(HashMap<Look, Handle<PolygonMaterial>>);
 
 pub(super) fn register(app: &mut App) {
     embedded_asset!(app, "polygon.wgsl");
@@ -44,17 +50,27 @@ pub(super) fn register(app: &mut App) {
 pub fn paint(
     palette: &mut Palette,
     materials: &mut Assets<PolygonMaterial>,
+    theme: &Theme,
     node: &CanvasNode,
 ) -> Handle<PolygonMaterial> {
     let sides = node.sides.unwrap_or(RECT_SIDES);
-    let color = body_color(node).to_linear().to_f32_array();
+    let color = body_color(theme, node).to_linear().to_f32_array();
+    let outline = outline_color(theme, node).to_linear().to_f32_array();
+    let size = Vec2::new(node.width as f32, node.height as f32);
     palette
         .0
-        .entry((sides, color.map(f32::to_bits)))
+        .entry((
+            sides,
+            color.map(f32::to_bits),
+            outline.map(f32::to_bits),
+            size.to_array().map(f32::to_bits),
+        ))
         .or_insert_with(|| {
             materials.add(PolygonMaterial {
                 paint: Paint {
                     color: Vec4::from_array(color),
+                    outline: Vec4::from_array(outline),
+                    size,
                     sides: f32::from(sides),
                 },
             })

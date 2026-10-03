@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use extboard_core::{Node as CanvasNode, NodeKind, sides_inset};
+use extboard_core::{Node as CanvasNode, NodeKind, TEXT, sides_inset};
 use std::collections::HashMap;
 
 use crate::camera::world_to_screen;
@@ -7,15 +7,15 @@ use crate::client::Document;
 use crate::node::{NodeId, NodeRect, depth};
 use crate::select::{OUTLINE, Selected};
 use crate::shape::{Palette, PolygonMaterial, paint};
+use crate::theme::Theme;
 
 use super::edit_text::{Editing, editor, label_editor};
-use super::{GROUP_LABEL, GROUP_SIZE, PADDING, ROW_GAP, blocks, markdown, spawn_blocks, wrap};
+use super::{GROUP_SIZE, PADDING, ROW_GAP, blocks, markdown, spawn_blocks, wrap};
 
 const OUTLINE_PX: f32 = 2.0;
 
-// The node's body: its fill, its clip box and whatever is drawn inside it. UI
-// rather than a mesh, because the text is UI and the UI pass runs after the
-// whole 2D world, so nothing in the world can ever occlude a panel.
+// UI rather than a mesh: the UI pass runs after the whole 2D world, so nothing
+// in the world can occlude a panel.
 #[derive(Component)]
 pub(super) struct Panel(String);
 
@@ -29,6 +29,7 @@ pub(super) fn spawn_panels(
     mut commands: Commands,
     document: Res<Document>,
     editing: Res<Editing>,
+    theme: Res<Theme>,
     mut palette: ResMut<Palette>,
     mut materials: ResMut<Assets<PolygonMaterial>>,
     existing: Query<Entity, With<Panel>>,
@@ -49,7 +50,7 @@ pub(super) fn spawn_panels(
                     overflow: Overflow::clip(),
                     ..default()
                 },
-                MaterialNode(paint(&mut palette, &mut materials, node)),
+                MaterialNode(paint(&mut palette, &mut materials, &theme, node)),
                 // Hidden rather than absent: toggling the component would move
                 // the panel between tables on every selection change.
                 Outline::new(px(OUTLINE_PX), px(0.0), Color::NONE),
@@ -72,33 +73,31 @@ pub(super) fn spawn_panels(
                             ..default()
                         },
                     ))
-                    .with_children(|parent| inside(node, &editing, parent));
+                    .with_children(|parent| inside(node, &editing, &theme, parent));
             });
     }
 }
 
-// A node inside a group has to draw over it, and two overlapping nodes have to
-// pick a winner: the same area-based depth the node entities carry, as a `ZIndex`
-// rank. Spawn order would do it too, but not visibly.
+// The same area-based depth the node entities carry, as a `ZIndex` rank: spawn
+// order would do it too, but not visibly.
 pub(super) fn back_to_front(nodes: &[CanvasNode]) -> Vec<&CanvasNode> {
     let mut order: Vec<&CanvasNode> = nodes.iter().collect();
     order.sort_by(|a, b| depth(a).total_cmp(&depth(b)));
     order
 }
 
-// Source while editing, rendered at rest, and a group is only ever its name.
-fn inside(node: &CanvasNode, editing: &Editing, parent: &mut ChildSpawnerCommands) {
+fn inside(node: &CanvasNode, editing: &Editing, theme: &Theme, parent: &mut ChildSpawnerCommands) {
     let open = editing.node() == Some(node.id.as_str());
     match (&node.kind, markdown(node)) {
         (_, Some(md)) if open => {
-            parent.spawn(editor(md));
+            parent.spawn(editor(md, theme.color(TEXT)));
         }
-        (_, Some(md)) => spawn_blocks(&blocks(md), parent),
+        (_, Some(md)) => spawn_blocks(&blocks(md), theme, parent),
         (NodeKind::Group { label: Some(label) }, _) => {
             parent.spawn((
                 Text::new(label.clone()),
                 TextFont::from_font_size(GROUP_SIZE),
-                TextColor(GROUP_LABEL),
+                TextColor(theme.color(TEXT)),
                 wrap(),
             ));
         }
@@ -111,11 +110,11 @@ fn content_padding(sides: Option<u8>, size: Vec2) -> UiRect {
     UiRect::axes(px(PADDING + inset * size.x), px(PADDING + inset * size.y))
 }
 
-// The label editor is spawned outside any panel: it is a fixed screen-sized box
-// on an edge, not part of a node's body.
+// Outside any panel: a fixed screen-sized box on an edge, not a node's body.
 pub(super) fn spawn_label_editor(
     mut commands: Commands,
     document: Res<Document>,
+    theme: Res<Theme>,
     editing: Res<Editing>,
 ) {
     if let Some(id) = editing.edge() {
@@ -125,14 +124,19 @@ pub(super) fn spawn_label_editor(
             .iter()
             .find(|edge| edge.id == id)
             .and_then(|edge| edge.label.as_deref());
-        commands.spawn(label_editor(label.unwrap_or_default()));
+        commands.spawn(label_editor(label.unwrap_or_default(), &theme));
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
 pub(super) fn track_panels(
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     document: Res<Document>,
     nodes: Query<(&NodeId, &Transform, &NodeRect)>,
+    theme: Res<Theme>,
     mut palette: ResMut<Palette>,
     mut materials: ResMut<Assets<PolygonMaterial>>,
     mut panels: Query<(&Panel, &mut Node, &mut MaterialNode<PolygonMaterial>)>,
@@ -166,7 +170,7 @@ pub(super) fn track_panels(
         // Here rather than at spawn: the slider and a resize drag both change
         // what a panel draws without waking the document.
         if let Some(&node) = current.get(panel.0.as_str()) {
-            let want = paint(&mut palette, &mut materials, node);
+            let want = paint(&mut palette, &mut materials, &theme, node);
             if material.0 != want {
                 material.0 = want;
             }
@@ -208,8 +212,7 @@ pub(super) fn track_panels(
     }
 }
 
-// The selection ring. A gizmo would be drawn in the world, which is to say under
-// every panel, including the one it is meant to be ringing.
+// A gizmo would be drawn in the world, under the panel it means to ring.
 pub(super) fn outline_panels(
     selected: Query<&NodeId, With<Selected>>,
     mut panels: Query<(&Panel, &mut Outline)>,

@@ -1,7 +1,9 @@
 use bevy::prelude::*;
+use extboard_core::{PRIMARY, SECONDARY};
 
 use crate::client::Document;
 use crate::select::Selected;
+use crate::theme::{Theme, hex};
 
 pub struct NodePlugin;
 
@@ -50,7 +52,6 @@ pub fn to_canvas(center: Vec2, size: Vec2) -> Vec2 {
     to_world(center) - size / 2.0
 }
 
-// trigger on canvas changes; sync nodes
 fn spawn_nodes(
     mut commands: Commands,
     document: Res<Document>,
@@ -65,8 +66,7 @@ fn spawn_nodes(
         commands.entity(entity).despawn();
     }
 
-    // The model of a node, not its picture: where it is and how big, for hit
-    // testing and for the panel that draws it.
+    // The model of a node, not its picture: for hit testing and for the panel.
     for node in &document.0.nodes {
         let mut spawned = commands.spawn((
             NodeId(node.id.clone()),
@@ -109,8 +109,7 @@ fn placement(node: &extboard_core::Node) -> Transform {
     .with_scale(size.extend(1.0))
 }
 
-// Bigger rects sit behind smaller ones, so a group never hides what is inside
-// it. All within (-1, 0), leaving z=1 for edge labels.
+// Bigger rects behind smaller, within (-1, 0) so z=1 is left for edge labels.
 pub fn depth(node: &extboard_core::Node) -> f32 {
     -(node.width as f32 * node.height as f32) / 1.0e6
 }
@@ -118,53 +117,30 @@ pub fn depth(node: &extboard_core::Node) -> f32 {
 // A group is a container: what sits inside it, edges included, shows through.
 const GROUP_ALPHA: f32 = 0.45;
 
-pub fn body_color(node: &extboard_core::Node) -> Color {
+pub fn body_color(theme: &Theme, node: &extboard_core::Node) -> Color {
     match node.kind {
-        extboard_core::NodeKind::Group { .. } => node_color(node).with_alpha(GROUP_ALPHA),
-        _ => node_color(node),
+        extboard_core::NodeKind::Group { .. } => node_color(theme, node).with_alpha(GROUP_ALPHA),
+        _ => node_color(theme, node),
     }
 }
 
-// The spec's colour field if the node carries one, and otherwise enough of a
-// palette to tell the four kinds apart.
-pub fn node_color(node: &extboard_core::Node) -> Color {
-    node.color
-        .as_deref()
-        .and_then(spec_color)
-        .unwrap_or_else(|| kind_color(&node.kind))
+// The rim, which a node never overrides: one palette per board.
+pub fn outline_color(theme: &Theme, node: &extboard_core::Node) -> Color {
+    theme
+        .color(PRIMARY)
+        .with_alpha(body_color(theme, node).alpha())
 }
 
-// Obsidian's own picker writes a preset index; the spec permits `#rrggbb` too,
-// and anything else is a colour we do not know, so the kind decides instead.
-fn spec_color(color: &str) -> Option<Color> {
-    if let Some(hex) = color.strip_prefix('#') {
-        let hex = u32::from_str_radix(hex, 16)
-            .ok()
-            .filter(|_| hex.len() == 6)?;
-        return Some(Color::srgb_u8(
-            (hex >> 16) as u8,
-            (hex >> 8) as u8,
-            hex as u8,
-        ));
-    }
-    // Obsidian's canvas presets, in its own order.
-    Some(match color {
-        "1" => Color::srgb_u8(0xfb, 0x46, 0x4c),
-        "2" => Color::srgb_u8(0xe9, 0x97, 0x3f),
-        "3" => Color::srgb_u8(0xe0, 0xde, 0x71),
-        "4" => Color::srgb_u8(0x44, 0xcf, 0x6e),
-        "5" => Color::srgb_u8(0x53, 0xdf, 0xdd),
-        "6" => Color::srgb_u8(0xa8, 0x82, 0xff),
-        _ => return None,
-    })
-}
-
-fn kind_color(kind: &extboard_core::NodeKind) -> Color {
-    match kind {
-        extboard_core::NodeKind::Text { .. } => Color::hsl(210.0, 0.45, 0.58),
-        extboard_core::NodeKind::File { .. } => Color::hsl(150.0, 0.40, 0.48),
-        extboard_core::NodeKind::Link { .. } => Color::hsl(285.0, 0.40, 0.60),
-        extboard_core::NodeKind::Group { .. } => Color::hsl(220.0, 0.15, 0.26),
+// The space's theme is the palette, so there is no per-kind colour left.
+pub fn node_color(theme: &Theme, node: &extboard_core::Node) -> Color {
+    let Some(color) = node.color.as_deref() else {
+        return theme.color(SECONDARY);
+    };
+    // Obsidian's preset index is a slot here, not a hue, so a retheme moves
+    // every node carrying one. `#rrggbb` stays a literal.
+    match color.parse::<usize>() {
+        Ok(slot) => theme.color(slot),
+        Err(_) => hex(color).unwrap_or_else(|| theme.color(SECONDARY)),
     }
 }
 
@@ -172,39 +148,106 @@ fn kind_color(kind: &extboard_core::NodeKind) -> Color {
 mod tests {
     use super::*;
 
-    #[test]
-    fn only_a_group_lets_what_is_inside_it_show_through() {
-        let node = |kind| extboard_core::Node {
+    fn node(kind: extboard_core::NodeKind, color: Option<&str>) -> extboard_core::Node {
+        extboard_core::Node {
             id: "n".to_owned(),
             x: 0,
             y: 0,
             width: 100,
             height: 100,
-            color: None,
+            color: color.map(str::to_owned),
             sides: None,
             kind,
             extra: serde_json::Map::new(),
-        };
-        let group = body_color(&node(extboard_core::NodeKind::Group { label: None }));
-        let text = body_color(&node(extboard_core::NodeKind::Text {
+        }
+    }
+
+    fn text() -> extboard_core::NodeKind {
+        extboard_core::NodeKind::Text {
             text: String::new(),
-        }));
+        }
+    }
+
+    fn themed(colors: &[&str]) -> Theme {
+        Theme::from_colors(colors)
+    }
+
+    #[test]
+    fn only_a_group_lets_what_is_inside_it_show_through() {
+        let theme = Theme::default();
+        let group = body_color(
+            &theme,
+            &node(extboard_core::NodeKind::Group { label: None }, None),
+        );
+        let text = body_color(&theme, &node(text(), None));
         assert!(group.alpha() < 1.0, "a group has to be see-through");
         assert_eq!(text.alpha(), 1.0, "everything else has to cover");
     }
 
+    // A short theme wraps rather than leaving a node with no colour.
     #[test]
-    fn a_colour_is_a_preset_index_a_hex_code_or_neither() {
-        assert_eq!(spec_color("4"), Some(Color::srgb_u8(0x44, 0xcf, 0x6e)));
-        assert_eq!(
-            spec_color("#1a2b3c"),
-            Some(Color::srgb_u8(0x1a, 0x2b, 0x3c))
-        );
-        // Not ours to guess: the kind decides.
-        assert_eq!(spec_color("7"), None);
-        assert_eq!(spec_color("#abc"), None);
-        assert_eq!(spec_color("#nothex"), None);
-        assert_eq!(spec_color("rebeccapurple"), None);
+    fn a_preset_index_is_a_slot_in_the_theme_and_it_wraps() {
+        let theme = themed(&["#000000", "#111111", "#222222", "#333333"]);
+        let slot = |color| node_color(&theme, &node(text(), Some(color)));
+        assert_eq!(slot("1"), Color::srgb_u8(0x11, 0x11, 0x11));
+        assert_eq!(slot("3"), Color::srgb_u8(0x33, 0x33, 0x33));
+        // Past the end of a short theme, and still a colour.
+        assert_eq!(slot("6"), slot("2"));
+        for index in ["1", "2", "3", "4", "5", "6"] {
+            assert_eq!(slot(index).alpha(), 1.0, "{index} drew as nothing");
+        }
+    }
+
+    #[test]
+    fn a_hex_colour_is_the_nodes_own_and_anything_else_falls_to_the_theme() {
+        let theme = themed(&["#000000", "#111111", "#222222", "#333333"]);
+        let drawn = |color| node_color(&theme, &node(text(), color));
+        assert_eq!(drawn(Some("#1a2b3c")), Color::srgb_u8(0x1a, 0x2b, 0x3c));
+        let kind = drawn(None);
+        assert_eq!(kind, theme.color(SECONDARY));
+        for junk in ["#abc", "#nothex", "rebeccapurple"] {
+            assert_eq!(drawn(Some(junk)), kind, "{junk}");
+        }
+    }
+
+    // The point of the theme: no node is drawn from a constant any more.
+    #[test]
+    fn changing_the_theme_moves_every_node_that_has_no_colour_of_its_own() {
+        let kinds = [
+            text(),
+            extboard_core::NodeKind::File {
+                file: "a.png".to_owned(),
+                subpath: None,
+            },
+            extboard_core::NodeKind::Link {
+                url: "https://example.com".to_owned(),
+            },
+            extboard_core::NodeKind::Group { label: None },
+        ];
+        let before = themed(&["#000000", "#111111", "#222222", "#333333"]);
+        let after = themed(&["#aaaaaa", "#bbbbbb", "#cccccc", "#dddddd"]);
+        for kind in kinds {
+            let node = node(kind, None);
+            assert_ne!(
+                body_color(&before, &node),
+                body_color(&after, &node),
+                "{:?}",
+                node.kind
+            );
+        }
+    }
+
+    #[test]
+    fn the_outline_is_primary_and_fades_with_the_body() {
+        let theme = themed(&["#000000", "#111111", "#222222", "#333333"]);
+        let primary = theme.color(PRIMARY);
+        let own = node(text(), Some("#1a2b3c"));
+        assert_eq!(outline_color(&theme, &own), primary);
+        let group = node(extboard_core::NodeKind::Group { label: None }, None);
+        let rim = outline_color(&theme, &group);
+        assert_eq!(rim.to_srgba().with_alpha(1.0), primary.to_srgba());
+        assert_eq!(rim.alpha(), body_color(&theme, &group).alpha());
+        assert!(rim.alpha() < 1.0, "a group's rim has to be see-through too");
     }
 
     #[test]

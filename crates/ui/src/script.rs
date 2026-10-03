@@ -2,7 +2,7 @@ use bevy::input_focus::{FocusCause, InputFocus};
 use bevy::prelude::*;
 use bevy::text::{EditableText, TextCursorStyle, TextEdit};
 use bevy::ui::widget::TextScroll;
-use extboard_core::{Canvas, rev};
+use extboard_core::{Canvas, object_mut, rev};
 use rhai::{AST, Engine, EvalAltResult, FnPtr};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -23,8 +23,6 @@ const MAX_CALLS: usize = 32;
 const MIN_EVERY: i64 = 1;
 // A press that travelled this far is a drag, and the node went with it.
 const SLOP_PX: f32 = 4.0;
-pub const DARK: Color = Color::srgb(0.07, 0.07, 0.09);
-const LIGHT: Color = Color::srgb(0.91, 0.91, 0.94);
 
 // The sidebar. Wide enough for a handler without wrapping, and a fixed strip
 // down the right edge so the hit test is a single comparison.
@@ -190,9 +188,7 @@ impl Plugin for ScriptPlugin {
             .add_systems(
                 Update,
                 (
-                    (recompile, repaint)
-                        .chain()
-                        .run_if(resource_exists_and_changed::<Document>),
+                    recompile.run_if(resource_exists_and_changed::<Document>),
                     (
                         toggle_sidebar,
                         draw_sidebar,
@@ -406,7 +402,9 @@ impl Script {
         for effect in std::mem::take(&mut lock(&self.pending).effects) {
             let outcome = match effect {
                 Effect::Theme(name) => {
-                    set_theme(canvas, &name);
+                    let mut theme = canvas.stored_theme();
+                    theme.name = name;
+                    canvas.set_theme(&theme);
                     Ok(())
                 }
                 Effect::Move(id, x, y) => canvas.move_node(&id, x, y),
@@ -594,23 +592,9 @@ pub fn set_script(canvas: &mut Canvas, name: &str, source: &str) -> bool {
 // The scripts block, made if absent and migrated off `extboard.script` on the
 // way. Everything that writes a script goes through here.
 fn scripts_mut(canvas: &mut Canvas) -> &mut Map<String, Value> {
-    let extboard = canvas
-        .extra
-        .entry("extboard")
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !extboard.is_object() {
-        *extboard = Value::Object(Map::new());
-    }
-    let extboard = extboard.as_object_mut().expect("an object either way");
+    let extboard = object_mut(&mut canvas.extra, "extboard");
     let legacy = extboard.remove(LEGACY);
-
-    let scripts = extboard
-        .entry("scripts")
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !scripts.is_object() {
-        *scripts = Value::Object(Map::new());
-    }
-    let scripts = scripts.as_object_mut().expect("an object either way");
+    let scripts = object_mut(extboard, "scripts");
     if let Some(source @ Value::String(_)) = legacy {
         scripts.entry(MAIN).or_insert(source);
     }
@@ -665,21 +649,6 @@ pub fn in_sidebar(window: &Window, at: Option<Vec2>) -> bool {
     at.is_some_and(|at| at.x >= window.width() - WIDTH)
 }
 
-fn theme_name(canvas: &Canvas) -> Option<&str> {
-    canvas.extra.get("theme")?.get("name")?.as_str()
-}
-
-fn set_theme(canvas: &mut Canvas, name: &str) {
-    let theme = canvas
-        .extra
-        .entry("theme")
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !theme.is_object() {
-        *theme = Value::Object(Map::new());
-    }
-    theme["name"] = Value::String(name.to_owned());
-}
-
 fn fault(e: impl std::fmt::Display) -> String {
     format!("script: {e}")
 }
@@ -703,16 +672,6 @@ fn recompile(mut script: ResMut<Script>, mut document: ResMut<Document>) {
     }
     // Reading through the `ResMut` does not mark it changed; writing would.
     script.lint(&document.0);
-}
-
-fn repaint(document: Res<Document>, mut clear: ResMut<ClearColor>) {
-    let want = match theme_name(&document.0) {
-        Some("light") => LIGHT,
-        _ => DARK,
-    };
-    if clear.0 != want {
-        clear.0 = want;
-    }
 }
 
 #[allow(
@@ -1187,7 +1146,10 @@ const API: [(&str, &str); 8] = [
         "now(format)",
         "the instant this run is for: \"%a %H:%M\" is \"Wed 14:32\"",
     ),
-    ("set_theme(name)", "\"dark\" or \"light\""),
+    (
+        "set_theme(name)",
+        "a preset: \"dracula-dark\", \"tokyo-night-light\", \"light\"",
+    ),
     ("move_node(id, x, y)", "top-left, in canvas coordinates"),
     ("resize_node(id, w, h)", "both have to be above zero"),
     (
@@ -1484,6 +1446,10 @@ fn block_end(chars: &[char], at: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    fn theme_name(canvas: &Canvas) -> Option<&str> {
+        canvas.extra.get("theme")?.get("name")?.as_str()
+    }
+
     use super::*;
 
     fn canvas() -> Canvas {
@@ -1540,7 +1506,6 @@ mod tests {
         app.add_plugins(ScriptPlugin)
             .init_resource::<Editing>()
             .init_resource::<InputFocus>()
-            .init_resource::<ClearColor>()
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<ButtonInput<MouseButton>>()
             .insert_resource(Document(canvas()));
@@ -1858,23 +1823,6 @@ mod tests {
             script.load(MAIN, reach, &mut canvas);
             assert!(error(&script, MAIN).is_some(), "{reach}");
         }
-    }
-
-    #[test]
-    fn a_theme_write_keeps_the_rest_of_the_theme() {
-        let mut canvas = canvas();
-        canvas.extra.insert(
-            "theme".to_owned(),
-            serde_json::json!({"name": "studio", "colors": ["#4b62f0"]}),
-        );
-        set_theme(&mut canvas, "dark");
-        assert_eq!(theme_name(&canvas), Some("dark"));
-        assert_eq!(canvas.extra["theme"]["colors"][0], "#4b62f0");
-
-        // A `theme` that is not an object is not something to merge into.
-        canvas.extra.insert("theme".to_owned(), Value::Bool(true));
-        set_theme(&mut canvas, "dark");
-        assert_eq!(theme_name(&canvas), Some("dark"));
     }
 
     #[test]

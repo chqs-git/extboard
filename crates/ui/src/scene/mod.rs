@@ -1,10 +1,11 @@
 use bevy::prelude::*;
 use bevy::text::TextLayoutInfo;
-use extboard_core::End;
+use extboard_core::{End, SECONDARY, TEXT};
 use std::collections::HashMap;
 
 use crate::client::Document;
 use crate::select::{OUTLINE, Selected};
+use crate::theme::Theme;
 
 mod arrow;
 mod geometry;
@@ -13,9 +14,6 @@ pub use arrow::draw_arrow;
 use geometry::{edge_ends, resolved_edges};
 pub use geometry::{nearest, segments};
 
-// As bright as the body text: a mid grey on this background reads as half
-// transparent, which is not what an edge is.
-const EDGE_COLOR: Color = Color::srgb(0.88, 0.9, 0.93);
 const LABEL_SIZE: f32 = 12.0;
 // Above the node rects, which sit at 0.
 const LABEL_Z: f32 = 1.0;
@@ -51,9 +49,9 @@ fn setup(mut store: ResMut<GizmoConfigStore>) {
 fn draw_edges(
     mut gizmos: Gizmos,
     document: Res<Document>,
+    theme: Res<Theme>,
     selected: Query<&EdgeId, With<Selected>>,
-    // Only the labelled edges have one, and its size is what the shaft makes
-    // room for: measured, not guessed from the character count.
+    // Its size is what the shaft makes room for: measured, not guessed.
     labels: Query<(&EdgeId, &TextLayoutInfo)>,
 ) {
     for (edge, from, to) in resolved_edges(&document.0) {
@@ -61,7 +59,7 @@ fn draw_edges(
         let color = if selected.iter().any(|picked| picked.0 == edge.id) {
             OUTLINE
         } else {
-            EDGE_COLOR
+            theme.color(SECONDARY)
         };
         let heads = (
             edge.from_end.unwrap_or(End::None) == End::Arrow,
@@ -78,6 +76,7 @@ fn draw_edges(
 fn spawn_edges(
     mut commands: Commands,
     document: Res<Document>,
+    theme: Res<Theme>,
     existing: Query<(Entity, &EdgeId, Has<Selected>)>,
 ) {
     let mut selected: Vec<&str> = Vec::new();
@@ -101,6 +100,7 @@ fn spawn_edges(
             spawned.insert((
                 Text2d::new(label.clone()),
                 TextFont::from_font_size(LABEL_SIZE),
+                TextColor(theme.color(TEXT)),
             ));
         }
     }

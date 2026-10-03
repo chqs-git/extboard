@@ -3,38 +3,32 @@ use bevy::prelude::*;
 use bevy::text::{FontStyle, FontWeight};
 use bevy::transform::TransformSystems;
 use bevy::ui::UiSystems;
-use extboard_core::{Node as CanvasNode, NodeKind};
+use extboard_core::{ACCENT, BACKGROUND, Node as CanvasNode, NodeKind, PRIMARY, TEXT};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use bevy::camera::CameraUpdateSystems;
 
 use crate::client::Document;
+use crate::theme::Theme;
 
 mod edit_text;
 mod panel;
 
 pub use edit_text::{Editing, Target, editing};
-use edit_text::{toggle, track_label};
+use edit_text::{release_field, toggle, track_label};
 use panel::{outline_panels, spawn_label_editor, spawn_panels, track_panels};
 
-// global mk settings
 const PADDING: f32 = 12.0;
 const ROW_GAP: f32 = 8.0;
 
 const BODY: f32 = 15.0;
 const CODE: f32 = 13.0;
-// A group's name, bigger and dimmer than body text: it labels a container.
 const GROUP_SIZE: f32 = 16.0;
-const GROUP_LABEL: Color = Color::srgb(0.7, 0.74, 0.8);
 
-const FG: Color = Color::srgb(0.88, 0.9, 0.93);
-const LINK: Color = Color::srgb(0.44, 0.62, 1.0);
-const MONO: Color = Color::srgb(0.7, 0.85, 0.72);
-const CODE_BG: Color = Color::srgb(0.06, 0.07, 0.09);
-const RULE: Color = Color::srgb(0.25, 0.27, 0.32);
+// A code block's well: the board behind it, so it reads as a hole in the node.
+const WELL: f32 = 0.5;
 
-// The frame's press, as the editors read it. Anything that means to consume a
-// click before they see it orders itself before this.
+// Anything consuming a click before the editors see it orders itself before this.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ReadPress;
 
@@ -47,7 +41,8 @@ impl Plugin for TextPlugin {
             // is either an editing frame or a canvas one, never half of each.
             .add_systems(
                 PreUpdate,
-                toggle
+                (release_field, toggle)
+                    .chain()
                     .in_set(ReadPress)
                     .after(InputSystems)
                     .run_if(resource_exists::<Document>),
@@ -58,12 +53,14 @@ impl Plugin for TextPlugin {
                 // document lands: entering edit mode has to rebuild a panel too.
                 (spawn_panels, spawn_label_editor).chain().run_if(
                     resource_exists::<Document>.and_then(
-                        resource_changed::<Document>.or_else(resource_changed::<Editing>),
+                        resource_changed::<Document>
+                            .or_else(resource_changed::<Editing>)
+                            .or_else(resource_changed::<crate::theme::Theme>),
                     ),
                 ),
             )
-            // After propagation and CameraUpdateSystems, or the camera transform and
-            // projection this reads are a frame stale. Before Layout: it writes `Node`.
+            // After propagation, or the camera it reads is a frame stale. Before
+            // Layout: it writes `Node`.
             .add_systems(
                 PostUpdate,
                 (
@@ -89,7 +86,6 @@ pub(super) fn markdown(node: &CanvasNode) -> Option<&str> {
 #[allow(clippy::type_complexity, reason = "a system's arguments are its query")]
 #[derive(Debug, PartialEq)]
 pub(super) enum Block {
-    // Paragraph, heading or list item.
     Line(Vec<Span>),
     Code(String),
     Table { cols: usize, cells: Vec<Cell> },
@@ -197,7 +193,6 @@ pub(super) fn blocks(md: &str) -> Vec<Block> {
                 spans.push(marks.span(text.into_string()));
                 marks.mono -= 1;
             }
-            // A paragraph inside a cell is the cell
             Event::End(TagEnd::Paragraph) if !in_table => flush(&mut out, &mut spans),
             Event::SoftBreak => spans.push(marks.span(" ")),
             Event::HardBreak => flush(&mut out, &mut spans),
@@ -223,22 +218,24 @@ fn heading_size(level: HeadingLevel) -> f32 {
     }
 }
 
-pub(super) fn spawn_blocks(blocks: &[Block], parent: &mut ChildSpawnerCommands) {
+pub(super) fn spawn_blocks(blocks: &[Block], theme: &Theme, parent: &mut ChildSpawnerCommands) {
     for block in blocks {
         match block {
             Block::Line(spans) => {
                 let Some((first, rest)) = spans.split_first() else {
                     continue;
                 };
-                parent.spawn(text_bundle(first)).with_children(|parent| {
-                    for span in rest {
-                        parent.spawn((
-                            TextSpan::new(span.text.clone()),
-                            font(span),
-                            TextColor(color(span)),
-                        ));
-                    }
-                });
+                parent
+                    .spawn(text_bundle(first, theme))
+                    .with_children(|parent| {
+                        for span in rest {
+                            parent.spawn((
+                                TextSpan::new(span.text.clone()),
+                                font(span),
+                                TextColor(color(span, theme)),
+                            ));
+                        }
+                    });
             }
             Block::Code(code) => {
                 parent
@@ -248,12 +245,12 @@ pub(super) fn spawn_blocks(blocks: &[Block], parent: &mut ChildSpawnerCommands) 
                             border_radius: BorderRadius::all(px(4.0)),
                             ..default()
                         },
-                        BackgroundColor(CODE_BG),
+                        BackgroundColor(theme.color(BACKGROUND).with_alpha(WELL)),
                     ))
                     .with_child((
                         Text::new(code.clone()),
                         TextFont::from_font_size(CODE),
-                        TextColor(MONO),
+                        TextColor(theme.color(ACCENT)),
                         wrap(),
                     ));
             }
@@ -277,7 +274,7 @@ pub(super) fn spawn_blocks(blocks: &[Block], parent: &mut ChildSpawnerCommands) 
                                         border: UiRect::all(px(1.0)),
                                         ..default()
                                     },
-                                    BorderColor::all(RULE),
+                                    BorderColor::all(theme.color(PRIMARY)),
                                 ))
                                 .with_child((
                                     Text::new(cell.text.clone()),
@@ -286,7 +283,7 @@ pub(super) fn spawn_blocks(blocks: &[Block], parent: &mut ChildSpawnerCommands) 
                                         bold: cell.head,
                                         ..default()
                                     }),
-                                    TextColor(FG),
+                                    TextColor(theme.color(TEXT)),
                                     wrap(),
                                 ));
                         }
@@ -296,17 +293,16 @@ pub(super) fn spawn_blocks(blocks: &[Block], parent: &mut ChildSpawnerCommands) 
     }
 }
 
-fn text_bundle(span: &Span) -> (Text, TextFont, TextColor, TextLayout) {
+fn text_bundle(span: &Span, theme: &Theme) -> (Text, TextFont, TextColor, TextLayout) {
     (
         Text::new(span.text.clone()),
         font(span),
-        TextColor(color(span)),
+        TextColor(color(span, theme)),
         wrap(),
     )
 }
 
-// Words stay whole where they can, and break where they cannot: a URL or a long
-// identifier is otherwise drawn straight out of the node and clipped.
+// A URL or a long identifier is otherwise drawn out of the node and clipped.
 pub(super) fn wrap() -> TextLayout {
     TextLayout {
         linebreak: LineBreak::WordOrCharacter,
@@ -333,14 +329,15 @@ fn font(span: &Span) -> TextFont {
     }
 }
 
-// No dimming: node rects are coloured, and a dimmed run on one is unreadable.
-fn color(span: &Span) -> Color {
+// A link and a code span are the runs that are not body text, so they take the
+// two slots that are not the node's own.
+fn color(span: &Span, theme: &Theme) -> Color {
     if span.link {
-        LINK
+        theme.color(PRIMARY)
     } else if span.mono {
-        MONO
+        theme.color(ACCENT)
     } else {
-        FG
+        theme.color(TEXT)
     }
 }
 
