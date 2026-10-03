@@ -124,8 +124,8 @@ fn kind_name(kind: &NodeKind) -> &'static str {
 fn payload(kind: &NodeKind) -> String {
     match kind {
         NodeKind::Text { text } => text.clone(),
-        // The caption, never the bytes: a file node's path is all the text it
-        // has until E8-T4 gives it one.
+        // The path, never the bytes. The caption a drop writes is its own text
+        // node under the image (E8-T4), so it arrives as a line of its own.
         NodeKind::File { file, subpath } => match subpath {
             Some(subpath) => format!("{file}{subpath}"),
             None => file.clone(),

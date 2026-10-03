@@ -15,6 +15,25 @@ pub const BASE_URL: &str = "http://127.0.0.1:7777";
 pub const TESTING_SPACE_ID: &str = "kitchen-sink";
 const RETRY_SECS: f32 = 2.0;
 
+// Where a `file` node's path resolves from: extd's spaces dir. In the browser
+// that is the path extd serves it under, absolute so it does not resolve
+// against `/s/<space>`; natively it is the directory itself, resolved the way
+// extd's store.rs resolves it.
+#[cfg(target_arch = "wasm32")]
+pub fn files_root() -> String {
+    "/f".to_owned()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn files_root() -> String {
+    std::env::var_os("EXTBOARD_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|home| home.join("extboard")))
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
 pub fn space_id() -> &'static str {
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| page_space_id().unwrap_or_else(|| TESTING_SPACE_ID.to_owned()))

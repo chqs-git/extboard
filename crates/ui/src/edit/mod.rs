@@ -36,6 +36,9 @@ const REACH_GRIP: f32 = ANCHOR_PX + 3.0;
 const REACH_HOVER: f32 = 56.0;
 const REACH_DRAG: f32 = 224.0;
 
+// Native only: a browser drop hands JS a `File` with no path.
+#[cfg(not(target_arch = "wasm32"))]
+mod drop;
 mod keys;
 
 pub use keys::duplicated;
@@ -108,6 +111,8 @@ impl Plugin for EditPlugin {
             )
                 .chain(),
         );
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(Update, drop::dropped.run_if(resource_exists::<Document>));
     }
 }
 
@@ -389,7 +394,7 @@ pub fn created(canvas: &mut Canvas, seed: u32, rect: Rect) -> String {
     )
 }
 
-pub(super) fn added(canvas: &mut Canvas, seed: u32, rect: Rect, kind: NodeKind) -> String {
+pub fn added(canvas: &mut Canvas, seed: u32, rect: Rect, kind: NodeKind) -> String {
     let top_left = to_canvas(rect.center(), rect.size());
     let id = fresh_id(canvas, &seed.to_le_bytes());
     canvas
