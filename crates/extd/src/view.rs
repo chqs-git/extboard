@@ -4,7 +4,9 @@
 //! into extd rather than living in its own crate — it is one handler with no
 //! second consumer.
 
-use extboard_core::{Canvas, End, Node, NodeKind, edge_ends};
+use extboard_core::{
+    CIRCLE_SIDES, Canvas, End, Node, NodeKind, edge_ends, sides_inset, sides_polygon,
+};
 use pulldown_cmark::{Event, Options, Parser};
 use std::fmt::Write;
 
@@ -33,9 +35,10 @@ pub fn page(space: &str, canvas: &Canvas) -> String {
         let (x, y) = at(node.x as f32, node.y as f32);
         let _ = write!(
             body,
-            r#"<div class="node {kind}" style="left:{x}px;top:{y}px;width:{w}px;height:{h}px">{}</div>"#,
+            r#"<div class="node {kind}" style="left:{x}px;top:{y}px;width:{w}px;height:{h}px{shape}">{}</div>"#,
             contents(node),
             kind = kind_class(&node.kind),
+            shape = shape_style(node),
             w = node.width,
             h = node.height,
         );
@@ -43,14 +46,15 @@ pub fn page(space: &str, canvas: &Canvas) -> String {
     // Last, so a label stays readable over whatever it crosses.
     body.push_str(&labels);
 
-    // `width=<board>` hands the phone a board-sized page: it fits it to the
-    // screen on load and pinch-zoom is the browser's, not ours.
+    // `width=<board>` alone hands the phone a board-sized page: it shrinks it to
+    // fit on load and pinch-zoom is the browser's, not ours. An `initial-scale`
+    // here would pin it at 1 and land the phone in the top-left corner.
     format!(
         r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width={w},initial-scale=1">
+<meta name="viewport" content="width={w}">
 <meta name="color-scheme" content="dark">
 <title>{title}</title>
 <style>{STYLE}</style>
@@ -190,6 +194,31 @@ fn kind_class(kind: &NodeKind) -> &'static str {
     }
 }
 
+fn shape_style(node: &Node) -> String {
+    let Some(sides) = node.sides else {
+        return String::new();
+    };
+    // Pixels, not percent: a CSS percentage padding is the width on all sides.
+    let inset = sides_inset(node.sides);
+    let pad = format!(
+        ";padding:{:.0}px {:.0}px",
+        inset * node.height as f32,
+        inset * node.width as f32
+    );
+    match sides {
+        CIRCLE_SIDES => format!(";border-radius:50%{pad}"),
+        sides => format!(";clip-path:polygon({}){pad}", ngon_points(sides)),
+    }
+}
+
+fn ngon_points(sides: u8) -> String {
+    sides_polygon(sides)
+        .iter()
+        .map(|(x, y)| format!("{:.1}% {:.1}%", 50.0 + 100.0 * x, 50.0 + 100.0 * y))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn contents(node: &Node) -> String {
     match &node.kind {
         NodeKind::Text { text } => markdown(text),
@@ -293,6 +322,7 @@ mod tests {
             width: 200,
             height: 100,
             color: None,
+            sides: None,
             kind: NodeKind::Text {
                 text: text.to_owned(),
             },
@@ -306,6 +336,29 @@ mod tests {
             edges,
             extra: Default::default(),
         }
+    }
+
+    // A pinned `initial-scale` beats `width=<board>` and strands the phone in the
+    // top-left corner of an unscrollable page.
+    #[test]
+    fn viewport_lets_the_phone_shrink_to_fit() {
+        let html = page("s", &canvas(vec![text_node("a", 0, 0, "hi")], vec![]));
+        assert!(!html.contains("initial-scale"), "{html}");
+    }
+
+    #[test]
+    fn a_node_is_clipped_to_its_side_count() {
+        let shaped = |sides| Node {
+            sides,
+            ..text_node("a", 0, 0, "hi")
+        };
+        let hex = shape_style(&shaped(Some(6)));
+        assert_eq!(hex.matches('%').count(), 12, "{hex}");
+        assert!(hex.contains("padding:"), "text would cross an edge: {hex}");
+        assert!(shape_style(&shaped(Some(CIRCLE_SIDES))).contains("border-radius:50%"));
+        assert!(shape_style(&shaped(None)).is_empty());
+        let square = shape_style(&shaped(Some(4)));
+        assert!(!square.contains("50.0% 0.0%"), "{square}");
     }
 
     // The one that matters: a board is untrusted input, and this file writes
@@ -373,7 +426,7 @@ mod tests {
         // MARGIN in from the top-left corner, wherever the board sat.
         assert!(html.contains("left:40px;top:40px"), "{html}");
         assert!(
-            html.contains("width=280,"),
+            html.contains(r#"width=280""#),
             "200 wide + two margins: {html}"
         );
     }

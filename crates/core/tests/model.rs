@@ -2,12 +2,13 @@
 //! that actually proves the no-data-loss claim — parsing alone is happy to
 //! drop a key it never looked at.
 
-use extboard_core::{Canvas, NodeKind};
+use extboard_core::{CIRCLE_SIDES, Canvas, MIN_SIDES, NodeKind};
 
-const FIXTURES: [(&str, &str); 3] = [
+const FIXTURES: [(&str, &str); 4] = [
     ("simple", include_str!("fixtures/simple.canvas")),
     ("unknown-keys", include_str!("fixtures/unknown-keys.canvas")),
     ("kitchen-sink", include_str!("fixtures/kitchen-sink.canvas")),
+    ("shapes", include_str!("fixtures/shapes.canvas")),
 ];
 
 #[test]
@@ -73,4 +74,41 @@ fn coordinates_stay_integers() {
 fn empty_canvas_parses() {
     let canvas: Canvas = serde_json::from_str("{}").unwrap();
     assert!(canvas.nodes.is_empty() && canvas.edges.is_empty());
+}
+
+#[test]
+fn sides_ride_on_any_node_and_the_type_is_untouched() {
+    let canvas: Canvas = serde_json::from_str(FIXTURES[3].1).unwrap();
+    let shapes: Vec<_> = canvas
+        .nodes
+        .iter()
+        .map(|n| (n.sides, matches!(n.kind, NodeKind::Text { .. })))
+        .collect();
+    assert_eq!(
+        shapes,
+        vec![
+            (Some(6), true),
+            (Some(CIRCLE_SIDES), true),
+            (Some(MIN_SIDES), false),
+            (None, true),
+        ]
+    );
+}
+
+#[test]
+fn sides_are_clamped_on_the_way_in() {
+    let canvas: Canvas = serde_json::from_str(
+        r#"{"nodes":[
+            {"id":"a","x":0,"y":0,"width":10,"height":10,"type":"text","text":"","sides":200},
+            {"id":"b","x":0,"y":0,"width":10,"height":10,"type":"text","text":"","sides":2},
+            {"id":"c","x":0,"y":0,"width":10,"height":10,"type":"text","text":"","sides":9},
+            {"id":"d","x":0,"y":0,"width":10,"height":10,"type":"text","text":""}
+        ]}"#,
+    )
+    .unwrap();
+    let sides: Vec<_> = canvas.nodes.iter().map(|n| n.sides).collect();
+    assert_eq!(
+        sides,
+        vec![Some(CIRCLE_SIDES), None, Some(CIRCLE_SIDES - 1), None]
+    );
 }

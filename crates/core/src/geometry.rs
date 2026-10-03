@@ -1,7 +1,7 @@
 //! Where an edge meets a node, in canvas coordinates (+y down). Shared because
 //! the Bevy scene and the phone view have to land an edge in the same place.
 
-use crate::{Node, Side};
+use crate::{CIRCLE_SIDES, MIN_SIDES, Node, Side};
 
 /// The side of `from` that naturally points at `to`, for an edge that did not
 /// say. Normalised by the pair's half-extents: two tall nodes side by side
@@ -34,6 +34,60 @@ pub fn side_anchor(node: &Node, side: Side) -> (f32, f32) {
     }
 }
 
+pub fn sides_polygon(sides: u8) -> Vec<(f32, f32)> {
+    let sides = sides.clamp(MIN_SIDES, CIRCLE_SIDES);
+    let turn = std::f32::consts::TAU / f32::from(sides);
+    // Even sides get a half-step turn, so a square sits flat.
+    let start = std::f32::consts::FRAC_PI_2
+        + if sides.is_multiple_of(2) {
+            turn / 2.0
+        } else {
+            0.0
+        };
+
+    let corners: Vec<(f32, f32)> = (0..sides)
+        .map(|i| {
+            let (sin, cos) = (start + turn * f32::from(i)).sin_cos();
+            (cos, -sin)
+        })
+        .collect();
+
+    // End to end rather than scaled about the centre: a triangle is not
+    // symmetric, and scaling alone leaves its base hanging inside the box.
+    let fit = |axis: fn(&(f32, f32)) -> f32| {
+        let low = corners.iter().map(axis).fold(f32::MAX, f32::min);
+        let high = corners.iter().map(axis).fold(f32::MIN, f32::max);
+        move |value: f32| (value - low) / (high - low) - 0.5
+    };
+    let (across, down) = (fit(|c| c.0), fit(|c| c.1));
+
+    corners.iter().map(|c| (across(c.0), down(c.1))).collect()
+}
+
+// The fraction of the box given up on each side, so content clears the sloped
+// edges. Zero for four sides, which is the box.
+pub fn sides_inset(sides: Option<u8>) -> f32 {
+    let Some(sides) = sides else {
+        return 0.0;
+    };
+    let polygon = sides_polygon(sides);
+    let mut half = 0.5f32;
+    for (a, b) in polygon.iter().zip(polygon.iter().cycle().skip(1)) {
+        let normal = (b.1 - a.1, a.0 - b.0);
+        let reach = normal.0 * a.0 + normal.1 * a.1;
+        let (normal, reach) = if reach < 0.0 {
+            ((-normal.0, -normal.1), -reach)
+        } else {
+            (normal, reach)
+        };
+        let corner = normal.0.abs() + normal.1.abs();
+        if corner > 0.0 {
+            half = half.min(reach / corner);
+        }
+    }
+    (0.5 - half).max(0.0)
+}
+
 /// Both ends of an edge, each side inferred when the edge left it out.
 pub fn edge_ends(
     from: &Node,
@@ -60,6 +114,7 @@ mod tests {
             width,
             height,
             color: None,
+            sides: None,
             kind: NodeKind::Text {
                 text: String::new(),
             },
@@ -108,5 +163,46 @@ mod tests {
         let (from, to) = edge_ends(&a, Some(Side::Top), &b, None);
         assert_eq!(from, side_anchor(&a, Side::Top));
         assert_eq!(to, side_anchor(&b, Side::Left));
+    }
+
+    #[test]
+    fn a_polygon_fills_the_node_box() {
+        let square = sides_polygon(4);
+        for corner in [(0.5, 0.5), (0.5, -0.5), (-0.5, 0.5), (-0.5, -0.5)] {
+            assert!(
+                square
+                    .iter()
+                    .any(|v| (v.0 - corner.0).abs() < 1e-5 && (v.1 - corner.1).abs() < 1e-5),
+                "{corner:?} is not a vertex of {square:?}"
+            );
+        }
+        let triangle = sides_polygon(3);
+        assert!((triangle[0].1 + 0.5).abs() < 1e-5, "{triangle:?}");
+        for sides in MIN_SIDES..=CIRCLE_SIDES {
+            let polygon = sides_polygon(sides);
+            for axis in [|v: &(f32, f32)| v.0, |v: &(f32, f32)| v.1] {
+                let low = polygon.iter().map(axis).fold(f32::MAX, f32::min);
+                let high = polygon.iter().map(axis).fold(f32::MIN, f32::max);
+                assert!(
+                    (low + 0.5).abs() < 1e-5 && (high - 0.5).abs() < 1e-5,
+                    "{sides} sides reach {low} to {high}: {polygon:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_content_inset_is_what_the_sloped_edges_cost() {
+        assert_eq!(sides_inset(None), 0.0);
+        assert!(sides_inset(Some(4)) < 1e-5, "a square is the whole box");
+        let insets: Vec<f32> = (MIN_SIDES..=CIRCLE_SIDES)
+            .map(|n| sides_inset(Some(n)))
+            .collect();
+        assert!(insets.iter().all(|inset| (0.0..0.5).contains(inset)));
+        assert_eq!(
+            insets.iter().copied().fold(f32::MIN, f32::max).to_bits(),
+            insets[0].to_bits(),
+            "{insets:?}"
+        );
     }
 }

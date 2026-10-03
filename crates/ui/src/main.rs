@@ -7,6 +7,7 @@ mod node;
 mod scene;
 mod script;
 mod select;
+mod shape;
 mod sync;
 mod text;
 mod undo;
@@ -35,6 +36,7 @@ fn main() {
             scene::ScenePlugin,
             script::ScriptPlugin,
             select::SelectPlugin,
+            shape::ShapePlugin,
             sync::SyncPlugin,
             text::TextPlugin,
             undo::UndoPlugin,

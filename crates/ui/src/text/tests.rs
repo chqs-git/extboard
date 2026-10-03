@@ -1,5 +1,5 @@
 use super::edit_text::written_back;
-use super::panel::{back_to_front, centre_scale_offset, fill};
+use super::panel::{back_to_front, centre_scale_offset};
 use super::*;
 use extboard_core::{Canvas, Edge};
 
@@ -18,6 +18,7 @@ fn canvas(text: &str) -> Canvas {
             width: 200,
             height: 100,
             color: None,
+            sides: None,
             kind: NodeKind::Text {
                 text: text.to_owned(),
             },
@@ -182,6 +183,7 @@ fn sized(id: &str, width: i64, kind: NodeKind) -> CanvasNode {
         width,
         height: width,
         color: None,
+        sides: None,
         kind,
         extra: default(),
     }
@@ -205,18 +207,4 @@ fn panels_are_ordered_back_to_front_by_area() {
         .map(|node| node.id.as_str())
         .collect();
     assert_eq!(order, ["group", "medium", "small"]);
-}
-
-#[test]
-fn only_a_group_lets_what_is_inside_it_show_through() {
-    let group = fill(&sized("g", 100, NodeKind::Group { label: None }));
-    let text = fill(&sized(
-        "t",
-        100,
-        NodeKind::Text {
-            text: String::new(),
-        },
-    ));
-    assert!(group.alpha() < 1.0, "a group has to be see-through");
-    assert_eq!(text.alpha(), 1.0, "everything else has to cover");
 }

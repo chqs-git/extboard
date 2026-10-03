@@ -40,6 +40,11 @@ type needs:
 `color` is optional on a node: `"1"` to `"6"` for the presets, or `"#rrggbb"`.
 Anything else draws as no colour at all, so a typo is a silent no-op.
 
+`sides` is optional on any node, and makes it a polygon: 3 to 9 for a regular
+polygon, 10 for a circle. The polygon fills the node's box, so 4 is exactly the
+rectangle a node is by default — leave the key out for that, which is also what
+under 3 means. Not in the spec, so Obsidian keeps the key and draws the rect.
+
 An edge has `id`, `fromNode`, `toNode`, and optionally `fromSide`/`toSide`
 (`top`, `right`, `bottom`, `left`), `fromEnd`/`toEnd` (`none`, `arrow`) and
 `label`. Leave the sides out and the board picks the pair that face each other,
