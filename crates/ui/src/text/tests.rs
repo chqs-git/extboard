@@ -208,3 +208,25 @@ fn panels_are_ordered_back_to_front_by_area() {
         .collect();
     assert_eq!(order, ["group", "medium", "small"]);
 }
+
+// Every run on a node comes out of the palette: a link and a code span take the
+// two slots that are not the body's, and none of the three is a constant.
+#[test]
+fn a_link_and_a_code_span_are_the_themes_rather_than_fixed_colours() {
+    let theme = Theme::from_colors(&["#000000", "#111111", "#222222", "#333333", "#444444"]);
+    let span = |mono, link| Span {
+        text: "x".to_owned(),
+        size: BODY,
+        bold: false,
+        italic: false,
+        mono,
+        link,
+    };
+    let body = color(&span(false, false), &theme);
+    let link = color(&span(false, true), &theme);
+    let mono = color(&span(true, false), &theme);
+    assert_eq!(body, theme.color(TEXT));
+    assert_eq!(link, theme.color(PRIMARY));
+    assert_eq!(mono, theme.color(ACCENT));
+    assert_eq!([body, link, mono].map(|c| c.alpha()), [1.0; 3]);
+}

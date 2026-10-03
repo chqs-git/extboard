@@ -10,7 +10,10 @@ mod select;
 mod shape;
 mod sync;
 mod text;
+mod theme;
 mod undo;
+#[cfg(test)]
+mod wgsl;
 
 use bevy::prelude::*;
 use bevy::window::PresentMode;
@@ -25,7 +28,7 @@ fn main() {
             }),
             ..default()
         }))
-        .insert_resource(ClearColor(script::DARK))
+        .insert_resource(ClearColor(theme::DARK))
         .add_plugins((
             camera::CameraPlugin,
             client::ClientPlugin,
@@ -39,6 +42,7 @@ fn main() {
             shape::ShapePlugin,
             sync::SyncPlugin,
             text::TextPlugin,
+            theme::ThemePlugin,
             undo::UndoPlugin,
         ))
         .run();

@@ -1,7 +1,7 @@
-use bevy::input_focus::AutoFocus;
+use bevy::input_focus::{AutoFocus, InputFocus};
 use bevy::prelude::*;
 use bevy::text::{EditableText, TextCursorStyle, TextEdit};
-use extboard_core::{Canvas, NodeKind};
+use extboard_core::{BACKGROUND, Canvas, NodeKind, TEXT};
 
 use crate::camera::world_to_screen;
 use crate::client::Document;
@@ -9,8 +9,9 @@ use crate::edit::double_click;
 use crate::node::{NodeId, NodeRect};
 use crate::scene::{EdgeId, nearest};
 use crate::select::{EDGE_PX, bounds, cursor_world, pick};
+use crate::theme::Theme;
 
-use super::{BODY, CODE_BG, FG, markdown};
+use super::{BODY, WELL, markdown};
 
 // The label editor is a fixed screen-sized box on the edge's midpoint: a label
 // is one short line, and it stays legible at every zoom.
@@ -57,7 +58,8 @@ impl Editing {
 }
 
 // One line on a solid ground, over the label it is replacing.
-pub(super) fn label_editor(label: &str) -> impl Bundle {
+pub(super) fn label_editor(label: &str, theme: &Theme) -> impl Bundle {
+    let fg = theme.color(TEXT);
     (
         Editor,
         LabelBox,
@@ -67,12 +69,12 @@ pub(super) fn label_editor(label: &str) -> impl Bundle {
             padding: UiRect::all(px(4.0)),
             ..default()
         },
-        BackgroundColor(CODE_BG),
+        BackgroundColor(theme.color(BACKGROUND).with_alpha(WELL)),
         EditableText::new(label),
         TextFont::from_font_size(BODY),
-        TextColor(FG),
+        TextColor(fg),
         TextCursorStyle {
-            color: FG,
+            color: fg,
             ..default()
         },
         AutoFocus,
@@ -107,9 +109,29 @@ pub(super) fn track_label(
     }
 }
 
+// A box that takes no newline has no use for enter, and escape means "done"
+// everywhere else in the editor: both let go of the caret. Without this a panel
+// field keeps the keyboard until something else is clicked, and the canvas is
+// deaf for as long as it does — the sides box and the theme boxes both.
+pub(super) fn release_field(
+    keys: Res<ButtonInput<KeyCode>>,
+    fields: Query<&EditableText>,
+    mut focus: ResMut<InputFocus>,
+) {
+    let Some(entity) = focus.get() else {
+        return;
+    };
+    if !keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter, KeyCode::Escape]) {
+        return;
+    }
+    if fields.get(entity).is_ok_and(|field| !field.allow_newlines) {
+        focus.clear();
+    }
+}
+
 // Source while editing, rendered at rest: the buffer is the node's raw markdown,
 // and the styled span tree is never edited.
-pub(super) fn editor(md: &str) -> impl Bundle {
+pub(super) fn editor(md: &str, fg: Color) -> impl Bundle {
     let mut buffer = EditableText {
         allow_newlines: true,
         // The node's own height, not a line count.
@@ -135,10 +157,10 @@ pub(super) fn editor(md: &str) -> impl Bundle {
             ..default()
         },
         TextFont::from_font_size(BODY),
-        TextColor(FG),
+        TextColor(fg),
         // The default caret is slate, which on a coloured node rect is invisible.
         TextCursorStyle {
-            color: FG,
+            color: fg,
             ..default()
         },
         AutoFocus,

@@ -81,7 +81,9 @@ impl Plugin for EditPlugin {
             Update,
             (
                 (
-                    grab.run_if(not(crate::shape::over_panel)),
+                    grab.run_if(
+                        not(crate::shape::over_panel).and_then(not(crate::theme::over_panel)),
+                    ),
                     apply.run_if(resource_exists::<Document>),
                     anchors,
                     connect.run_if(resource_exists::<Document>),
@@ -99,7 +101,8 @@ impl Plugin for EditPlugin {
                     .run_if(
                         resource_exists::<Document>
                             .and_then(not(crate::text::editing))
-                            .and_then(not(crate::shape::typing)),
+                            .and_then(not(crate::shape::typing))
+                            .and_then(not(crate::theme::typing)),
                     ),
                 cursor,
             )

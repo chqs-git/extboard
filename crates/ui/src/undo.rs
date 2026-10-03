@@ -258,6 +258,29 @@ mod tests {
         assert!(script::script(&back, "themes").contains("on_click"));
     }
 
+    // Ctrl-Z over a theme edit needs nothing of its own: the palette is part of
+    // the canvas, so this stack already carries it. `without_script` strips the
+    // scripts and only the scripts, which is what makes that true.
+    #[test]
+    fn a_theme_edit_is_a_step_this_stack_takes() {
+        let mut history = History::default();
+        let mut live = canvas(0);
+        gesture(&mut history, live.clone());
+
+        let mine = extboard_core::Theme {
+            name: "mine".to_owned(),
+            colors: vec!["#111111".to_owned()],
+        };
+        live.set_theme(&mine);
+        assert!(live.save_theme(&mine), "and the library with it");
+        assert_ne!(step_rev(&live), step_rev(&canvas(0)));
+
+        gesture(&mut history, live.clone());
+        let back = history.undo(&live).expect("a step back");
+        assert_eq!(back.stored_theme(), extboard_core::Theme::default());
+        assert!(back.themes().is_empty());
+    }
+
     // An undo writes the document too, and that write is not a new step.
     #[test]
     fn a_step_this_stack_took_is_not_recorded_as_an_edit() {
