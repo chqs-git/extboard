@@ -6,8 +6,8 @@ use bevy::ui_widgets::{
     Slider, SliderRange, SliderStep, SliderThumb, SliderValue, TrackClick, ValueChange,
 };
 use extboard_core::{
-    CIRCLE_SIDES, Canvas, FONT_ROLES, MID_STROKE, MIN_SIDES, PRIMARY, PRIMARY_TEXT, SECONDARY,
-    STROKES, TEXT, Theme as Block, stroke_width, style,
+    CIRCLE_SIDES, Canvas, FONT_ROLES, LEFT_ALIGN, MID_STROKE, MIN_SIDES, PRIMARY, PRIMARY_TEXT,
+    SECONDARY, STROKES, TEXT, Theme as Block, align, stroke_width, style,
 };
 use serde_json::{Map, Value};
 
@@ -84,6 +84,7 @@ pub(crate) struct ConfigPanel {
     pub(super) background: Option<Paint>,
     pub(super) weight: Option<u8>,
     pub(super) font: Option<usize>,
+    pub(super) align: Option<usize>,
     pub(super) slots: usize,
     pub(super) open: Option<Row>,
 }
@@ -96,6 +97,9 @@ pub(crate) struct SidesField;
 
 #[derive(Component)]
 struct Weight(u8);
+
+#[derive(Component)]
+struct Align(usize);
 
 // A row of an open list: a palette slot, or none of them.
 #[derive(Component)]
@@ -218,6 +222,7 @@ pub(super) fn shown(
             background,
             weight: stroke_width(extra),
             font: style::font_role(extra),
+            align: align(extra),
             slots: theme.live.colors.len(),
             // An edge has no body and no text of its own to set, so neither
             // list can be open over it -- not even one the node before it left
@@ -237,6 +242,7 @@ fn spawn(commands: &mut Commands, theme: &Theme, want: Shown) {
     let (outline, text) = (panel.outline.clone(), panel.text.clone());
     let background = panel.background.clone();
     let (weight, font, open) = (panel.weight, panel.font, panel.open);
+    let align = panel.align;
     commands
         .spawn((
             panel,
@@ -252,7 +258,7 @@ fn spawn(commands: &mut Commands, theme: &Theme, want: Shown) {
                 top: px(TOP),
                 width: px(WIDTH),
                 padding: UiRect::all(px(PAD)),
-                row_gap: px(4.0),
+                row_gap: px(6.5),
                 flex_direction: FlexDirection::Column,
                 border_radius: BorderRadius::all(px(8.0)),
                 ..default()
@@ -260,10 +266,19 @@ fn spawn(commands: &mut Commands, theme: &Theme, want: Shown) {
             BackgroundColor(PANEL_BG),
         ))
         .with_children(|parent| {
-            color_chip(parent, Row::Outline, &outline);
-            color_chip(parent, Row::Text, &text);
             if let Some(background) = &background {
                 color_chip(parent, Row::Background, background);
+            }
+            color_chip(parent, Row::Outline, &outline);
+            color_chip(parent, Row::Text, &text);
+            if node {
+                font_chip(parent, theme, font.unwrap_or(PRIMARY_TEXT));
+                let picked = align.unwrap_or(LEFT_ALIGN);
+                labelled(parent, "align", |parent| {
+                    for align in 0..ALIGN_LABELS.len() {
+                        align_button(parent, align, align == picked);
+                    }
+                });
             }
             let pen = weight.unwrap_or(MID_STROKE);
             labelled(parent, "width", |parent| {
@@ -271,9 +286,6 @@ fn spawn(commands: &mut Commands, theme: &Theme, want: Shown) {
                     weight_button(parent, weight, weight == pen);
                 }
             });
-            if node {
-                font_chip(parent, theme, font.unwrap_or(PRIMARY_TEXT));
-            }
             if let Some(sides) = sides {
                 sides_row(parent, sides);
             }
@@ -429,6 +441,26 @@ fn weight_button(parent: &mut ChildSpawnerCommands, weight: u8, on: bool) {
             )],
         ))
         .observe(pick_weight);
+}
+
+const ALIGN_LABELS: [&str; 3] = ["left", "center", "right"];
+
+fn align_button(parent: &mut ChildSpawnerCommands, align: usize, on: bool) {
+    parent
+        .spawn((
+            Align(align),
+            Node {
+                flex_grow: 1.0,
+                height: px(ROW),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border_radius: BorderRadius::all(px(3.0)),
+                ..default()
+            },
+            BackgroundColor(row_bg(on)),
+            children![tag(ALIGN_LABELS[align], if on { FG } else { LABEL })],
+        ))
+        .observe(pick_align);
 }
 
 // The open list: the palette by role, or the three texts.
@@ -604,6 +636,20 @@ fn pick_weight(
     };
     if let Some(extra) = extras(&mut document.0, &panel.target) {
         style::set_stroke_width(extra, button.0);
+    }
+}
+
+fn pick_align(
+    press: On<Pointer<Press>>,
+    buttons: Query<&Align>,
+    panels: Query<&ConfigPanel>,
+    mut document: ResMut<Document>,
+) {
+    let (Ok(button), Ok(panel)) = (buttons.get(press.entity), panels.single()) else {
+        return;
+    };
+    if let Some(extra) = extras(&mut document.0, &panel.target) {
+        style::set_align(extra, Some(button.0));
     }
 }
 

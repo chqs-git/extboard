@@ -1,6 +1,6 @@
 use bevy::input::InputSystems;
 use bevy::prelude::*;
-use bevy::text::{FontStyle, FontWeight};
+use bevy::text::{FontStyle, FontWeight, Justify};
 use bevy::transform::TransformSystems;
 use bevy::ui::UiSystems;
 use extboard_core::{ACCENT, BACKGROUND, Node as CanvasNode, NodeKind, PRIMARY, TEXT};
@@ -264,6 +264,7 @@ pub(super) fn spawn_blocks(
     theme: &Theme,
     face: &Face,
     raster: f32,
+    justify: Justify,
     parent: &mut ChildSpawnerCommands,
 ) {
     for block in blocks {
@@ -273,7 +274,7 @@ pub(super) fn spawn_blocks(
                     continue;
                 };
                 parent
-                    .spawn(text_bundle(first, theme, face, raster))
+                    .spawn(text_bundle(first, theme, face, raster, justify))
                     .with_children(|parent| {
                         for span in rest {
                             parent.spawn((
@@ -301,7 +302,7 @@ pub(super) fn spawn_blocks(
                             ..TextFont::from_font_size(CODE)
                         },
                         TextColor(theme.color(ACCENT)),
-                        wrap(),
+                        wrap(Justify::Left),
                     ));
             }
             Block::Table { cols, cells } => {
@@ -338,7 +339,7 @@ pub(super) fn spawn_blocks(
                                         raster,
                                     ),
                                     TextColor(theme.color(TEXT)),
-                                    wrap(),
+                                    wrap(Justify::Left),
                                 ));
                         }
                     });
@@ -352,20 +353,21 @@ fn text_bundle(
     theme: &Theme,
     face: &Face,
     raster: f32,
+    justify: Justify,
 ) -> (Text, TextFont, TextColor, TextLayout) {
     (
         Text::new(span.text.clone()),
         font(span, face, raster),
         TextColor(color(span, theme, face)),
-        wrap(),
+        wrap(justify),
     )
 }
 
 // A URL or a long identifier is otherwise drawn out of the node and clipped.
-pub(super) fn wrap() -> TextLayout {
+pub(super) fn wrap(justify: Justify) -> TextLayout {
     TextLayout {
+        justify,
         linebreak: LineBreak::WordOrCharacter,
-        ..default()
     }
 }
 
@@ -390,6 +392,15 @@ fn font(span: &Span, face: &Face, raster: f32) -> TextFont {
         },
         font_smoothing: face.smoothing,
         ..TextFont::from_font_size(span.size * raster)
+    }
+}
+
+// Left, centred, or right, by the node's own `textAlign`.
+pub(super) fn justify(extra: &serde_json::Map<String, serde_json::Value>) -> Justify {
+    match extboard_core::align(extra) {
+        Some(1) => Justify::Center,
+        Some(2) => Justify::Right,
+        _ => Justify::Left,
     }
 }
 
