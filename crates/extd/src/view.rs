@@ -28,10 +28,9 @@ pub fn page(space: &str, canvas: &Canvas) -> String {
         w = size.0,
         h = size.1
     );
-    // Big rects first, so a group never covers what sits inside it.
-    let mut nodes: Vec<&Node> = canvas.nodes.iter().collect();
-    nodes.sort_by_key(|node| std::cmp::Reverse(node.width * node.height));
-    for node in nodes {
+    // Document order: array position is z-order (PLAN.md §8), and for absolute
+    // siblings so is DOM order, so the phone stacks them like the canvas does.
+    for node in &canvas.nodes {
         let (x, y) = at(node.x as f32, node.y as f32);
         let _ = write!(
             body,

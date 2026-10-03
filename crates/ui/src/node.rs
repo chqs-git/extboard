@@ -67,7 +67,8 @@ fn spawn_nodes(
     }
 
     // The model of a node, not its picture: for hit testing and for the panel.
-    for node in &document.0.nodes {
+    let count = document.0.nodes.len();
+    for (index, node) in document.0.nodes.iter().enumerate() {
         let mut spawned = commands.spawn((
             NodeId(node.id.clone()),
             NodeRect {
@@ -75,7 +76,7 @@ fn spawn_nodes(
                 h: node.height,
             },
             NodeKind(node.kind.clone()),
-            placement(node),
+            placement(node, depth(index, count)),
         ));
         if selected.contains(&node.id.as_str()) {
             spawned.insert(Selected);
@@ -87,11 +88,18 @@ fn place_nodes(
     document: Res<Document>,
     mut nodes: Query<(&NodeId, &mut Transform, &mut NodeRect)>,
 ) {
+    let count = document.0.nodes.len();
     for (id, mut transform, mut rect) in &mut nodes {
-        let Some(node) = document.0.nodes.iter().find(|node| node.id == id.0) else {
+        let Some((index, node)) = document
+            .0
+            .nodes
+            .iter()
+            .enumerate()
+            .find(|(_, node)| node.id == id.0)
+        else {
             continue;
         };
-        let want = placement(node);
+        let want = placement(node, depth(index, count));
         if *transform != want {
             *transform = want;
         }
@@ -101,17 +109,18 @@ fn place_nodes(
     }
 }
 
-fn placement(node: &extboard_core::Node) -> Transform {
+fn placement(node: &extboard_core::Node, depth: f32) -> Transform {
     let size = Vec2::new(node.width as f32, node.height as f32);
     Transform::from_translation(
-        to_world(Vec2::new(node.x as f32, node.y as f32) + size / 2.0).extend(depth(node)),
+        to_world(Vec2::new(node.x as f32, node.y as f32) + size / 2.0).extend(depth),
     )
     .with_scale(size.extend(1.0))
 }
 
-// Bigger rects behind smaller, within (-1, 0) so z=1 is left for edge labels.
-pub fn depth(node: &extboard_core::Node) -> f32 {
-    -(node.width as f32 * node.height as f32) / 1.0e6
+// Array position is z-order, last front-most (PLAN.md §8), spread over (-1, 0)
+// so z=1 is left for edge labels.
+pub fn depth(index: usize, count: usize) -> f32 {
+    (index as f32 + 1.0) / (count as f32 + 1.0) - 1.0
 }
 
 // A group is a container: what sits inside it, edges included, shows through.
@@ -250,6 +259,20 @@ mod tests {
         assert_eq!(rim.to_srgba().with_alpha(1.0), primary.to_srgba());
         assert_eq!(rim.alpha(), body_color(&theme, &group).alpha());
         assert!(rim.alpha() < 1.0, "a group's rim has to be see-through too");
+    }
+
+    // The spec's rule, and the one the edge labels at z=1 depend on.
+    #[test]
+    fn later_in_the_array_is_nearer_the_front_and_never_as_far_as_a_label() {
+        let count = 4;
+        let depths: Vec<f32> = (0..count).map(|index| depth(index, count)).collect();
+        assert!(
+            depths.windows(2).all(|pair| pair[0] < pair[1]),
+            "{depths:?}"
+        );
+        assert!(depths.iter().all(|&z| z > -1.0 && z < 0.0), "{depths:?}");
+        // A lone node is still behind the labels.
+        assert!(depth(0, 1) < 0.0);
     }
 
     #[test]

@@ -707,10 +707,66 @@ fn release(
     mut commands: Commands,
     buttons: Res<ButtonInput<MouseButton>>,
     drag: Option<Res<Drag>>,
+    nodes: Query<(&NodeId, &Transform)>,
+    document: Option<ResMut<Document>>,
 ) {
-    if drag.is_some() && !buttons.pressed(MouseButton::Left) {
-        commands.remove_resource::<Drag>();
+    if drag.is_none() || buttons.pressed(MouseButton::Left) {
+        return;
     }
+    // On release rather than on the press: a restack respawns every node, and
+    // the drag holds the entities it is moving. A press that moved nothing is a
+    // selection click, and leaves the depth alone for the panel to set.
+    if let (Some(Drag::Move { start, .. }), Some(mut document)) = (drag.as_deref(), document)
+        && start
+            .iter()
+            .any(|&(entity, from)| moved_from(&nodes, entity, from))
+    {
+        // In the drag's own order, which puts a group behind the contents it
+        // carried along.
+        for &(entity, _) in start {
+            if let Ok((id, _)) = nodes.get(entity) {
+                restacked(&mut document.0, &id.0, Depth::Front);
+            }
+        }
+    }
+    commands.remove_resource::<Drag>();
+}
+
+fn moved_from(nodes: &Query<(&NodeId, &Transform)>, entity: Entity, from: Vec2) -> bool {
+    nodes
+        .get(entity)
+        .is_ok_and(|(_, transform)| transform.translation.truncate() != from)
+}
+
+// Depth is array position (PLAN.md §8), so every one of these is a move inside
+// `nodes`: a step is a swap with the neighbour, an end is a move to it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Depth {
+    Back,
+    Behind,
+    Ahead,
+    Front,
+}
+
+// `false` when the node is already there, so a button at the end of its travel
+// is not an edit and does not cost a save.
+pub fn restacked(canvas: &mut Canvas, id: &str, to: Depth) -> bool {
+    let Some(at) = canvas.nodes.iter().position(|node| node.id == id) else {
+        return false;
+    };
+    let last = canvas.nodes.len() - 1;
+    let want = match to {
+        Depth::Back => 0,
+        Depth::Behind => at.saturating_sub(1),
+        Depth::Ahead => (at + 1).min(last),
+        Depth::Front => last,
+    };
+    if want == at {
+        return false;
+    }
+    let node = canvas.nodes.remove(at);
+    canvas.nodes.insert(want, node);
+    true
 }
 
 fn cursor(

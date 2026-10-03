@@ -148,7 +148,11 @@ pub(super) fn grouped(canvas: &mut Canvas, seed: u32, rects: &[Rect]) -> Option<
         .copied()
         .reduce(|a, b| a.union(b))?
         .inflate(GROUP_PAD);
-    Some(added(canvas, seed, bounds, NodeKind::Group { label: None }))
+    let id = added(canvas, seed, bounds, NodeKind::Group { label: None });
+    // A group is a container: it belongs behind what it holds, and `added`
+    // appends, which is the front.
+    canvas.nodes.rotate_right(1);
+    Some(id)
 }
 
 #[cfg(test)]
@@ -174,6 +178,10 @@ mod tests {
         let copies = duplicated(&mut canvas, 3, &[&first, &second]);
         assert_eq!(copies.len(), 2);
         assert_eq!(canvas.nodes.len(), 4);
+        // The end of the array is the front (PLAN.md §8): a copy lands over the
+        // node it came from, never under it.
+        let order: Vec<&str> = canvas.nodes.iter().map(|node| node.id.as_str()).collect();
+        assert_eq!(order[2..], copies[..]);
         // Distinct from each other and from what they were copied from.
         assert_ne!(copies[0], copies[1]);
         assert!(!copies.contains(&first) && !copies.contains(&second));

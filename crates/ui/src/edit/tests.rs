@@ -428,3 +428,52 @@ fn a_locked_move_keeps_only_the_axis_it_went_furthest_along() {
     // A diagonal of exactly equal parts has to pick one, and does not wobble.
     assert_eq!(travel(Vec2::splat(20.0), true), Vec2::new(20.0, 0.0));
 }
+
+fn four() -> Canvas {
+    let mut canvas = canvas();
+    for id in ["b", "c", "d"] {
+        let mut node = canvas.nodes[0].clone();
+        node.id = id.to_owned();
+        canvas.add_node(node).expect("a fresh id");
+    }
+    canvas
+}
+
+fn ids(canvas: &Canvas) -> Vec<String> {
+    canvas.nodes.iter().map(|node| node.id.clone()).collect()
+}
+
+#[test]
+fn a_step_swaps_with_the_neighbour_and_an_end_moves_past_all_of_them() {
+    let mut canvas = four();
+    assert!(restacked(&mut canvas, "n", Depth::Front));
+    assert_eq!(ids(&canvas), ["b", "c", "d", "n"]);
+    assert!(restacked(&mut canvas, "n", Depth::Behind));
+    assert_eq!(ids(&canvas), ["b", "c", "n", "d"]);
+    assert!(restacked(&mut canvas, "n", Depth::Ahead));
+    assert_eq!(ids(&canvas), ["b", "c", "d", "n"]);
+    assert!(restacked(&mut canvas, "n", Depth::Back));
+    assert_eq!(ids(&canvas), ["n", "b", "c", "d"]);
+}
+
+// A button at the end of its travel: no edit, so it costs no save.
+#[test]
+fn the_ends_hold_and_a_node_that_cannot_move_is_not_a_change() {
+    let mut canvas = four();
+    assert!(!restacked(&mut canvas, "n", Depth::Back));
+    assert!(!restacked(&mut canvas, "n", Depth::Behind));
+    assert!(!restacked(&mut canvas, "d", Depth::Front));
+    assert!(!restacked(&mut canvas, "d", Depth::Ahead));
+    assert!(!restacked(&mut canvas, "gone", Depth::Front), "a stale id");
+    assert_eq!(ids(&canvas), ["n", "b", "c", "d"]);
+}
+
+// What a drag's release does to the set it carried, one node at a time.
+#[test]
+fn raising_a_drag_set_in_its_own_order_leaves_the_rest_alone() {
+    let mut canvas = four();
+    for id in ["n", "c"] {
+        restacked(&mut canvas, id, Depth::Front);
+    }
+    assert_eq!(ids(&canvas), ["b", "d", "n", "c"]);
+}
