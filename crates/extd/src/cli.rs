@@ -29,6 +29,10 @@ pub enum Command {
     // Print the LLM view of a .canvas file on stdout.
     Project {
         file: PathBuf,
+
+        // Node ids to scope the projection to, comma separated.
+        #[arg(long, value_delimiter = ',')]
+        selection: Vec<String>,
     },
 
     // Read a projection on stdin and write it back over a .canvas file.
@@ -46,8 +50,11 @@ pub enum Command {
     },
 }
 
-pub fn project(file: &Path) -> Result<(), Box<dyn Error>> {
-    print!("{}", crate::project::render(&load(file)?.1));
+pub fn project(file: &Path, selection: &[String]) -> Result<(), Box<dyn Error>> {
+    let selection = (!selection.is_empty()).then_some(selection);
+    let projected = crate::project::render(&load(file)?.1, selection)
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    print!("{projected}");
     Ok(())
 }
 

@@ -1,30 +1,83 @@
 use extboard_core::{Canvas, Edge, Node, NodeKind, Side, validate};
 use serde_json::Value;
+use std::collections::HashSet;
 
 pub const CELL: i64 = 20;
 
 pub const SCRIPT_PLACEHOLDER: &str = "<kept>";
 
-pub fn render(canvas: &Canvas) -> String {
-    let mut out = format!("grid {CELL}\n");
+pub fn render(canvas: &Canvas, selection: Option<&[String]>) -> Result<String, String> {
+    let scope = scope(canvas, selection)?;
+
+    let mut out = format!("grid {CELL}");
+    if let Some(scope) = &scope {
+        out.push_str(&format!(" scope {}", in_order(canvas, scope).join(",")));
+    }
+    out.push('\n');
 
     for name in script_names(canvas) {
         out.push_str(&format!("script {name} {SCRIPT_PLACEHOLDER}\n"));
     }
 
-    let mut nodes: Vec<&Node> = canvas.nodes.iter().collect();
+    let edges: Vec<&Edge> = canvas
+        .edges
+        .iter()
+        .filter(|edge| match &scope {
+            Some(scope) => scope.contains(&edge.from_node) || scope.contains(&edge.to_node),
+            None => true,
+        })
+        .collect();
+
+    let shown = |node: &Node| match &scope {
+        None => true,
+        Some(scope) => {
+            scope.contains(&node.id)
+                || edges
+                    .iter()
+                    .any(|edge| edge.from_node == node.id || edge.to_node == node.id)
+        }
+    };
+
+    let mut nodes: Vec<&Node> = canvas.nodes.iter().filter(|node| shown(node)).collect();
     nodes.sort_by_key(|node| (cells(node.y), cells(node.x), node.id.clone()));
     for node in nodes {
         out.push_str(&node_line(node));
         out.push('\n');
     }
 
-    for edge in &canvas.edges {
+    for edge in edges {
         out.push_str(&edge_line(edge));
         out.push('\n');
     }
 
-    out
+    Ok(out)
+}
+
+// A selection is useless silently: a typo would project an empty board and
+// spend a whole run on it.
+fn scope(canvas: &Canvas, selection: Option<&[String]>) -> Result<Option<HashSet<String>>, String> {
+    let Some(selection) = selection else {
+        return Ok(None);
+    };
+    let scope: HashSet<String> = selection.iter().cloned().collect();
+    let missing: Vec<&String> = scope
+        .iter()
+        .filter(|id| !canvas.nodes.iter().any(|node| &node.id == *id))
+        .collect();
+    if let Some(id) = missing.first() {
+        return Err(format!("no node with id {id}"));
+    }
+    Ok(Some(scope))
+}
+
+// The document's own order, so the header is the same for the same selection.
+fn in_order(canvas: &Canvas, scope: &HashSet<String>) -> Vec<String> {
+    canvas
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .filter(|id| scope.contains(id))
+        .collect()
 }
 
 pub fn cells(units: i64) -> i64 {
@@ -131,6 +184,7 @@ pub fn unproject(projected: &str, original: &Canvas) -> Result<Canvas, String> {
         edges: Vec::new(),
         extra: original.extra.clone(),
     };
+    let mut scoped = None;
 
     for (number, line) in projected.lines().enumerate() {
         let line = line.trim();
@@ -139,12 +193,16 @@ pub fn unproject(projected: &str, original: &Canvas) -> Result<Canvas, String> {
         }
         let at = |e: String| format!("line {}: {e}", number + 1);
         match line.split_whitespace().next() {
-            Some("grid") => grid(line).map_err(at)?,
+            Some("grid") => scoped = grid(line).map_err(at)?,
             Some("script") => {}
             Some("edge") => canvas.edges.push(edge(line, original).map_err(at)?),
             Some(_) => canvas.nodes.push(node(line, original).map_err(at)?),
             None => {}
         }
+    }
+
+    if let Some(scope) = scoped {
+        merge(&mut canvas, original, &scope);
     }
 
     validate(&canvas).map_err(|errors| {
@@ -164,11 +222,58 @@ pub fn units(cells: i64) -> i64 {
 
 // The grid is fixed, so a header naming another one is a projection from a
 // different reference frame and nothing here can place it.
-fn grid(line: &str) -> Result<(), String> {
-    match line.split_whitespace().nth(1).map(str::parse::<i64>) {
-        Some(Ok(CELL)) => Ok(()),
-        _ => Err(format!("grid must be {CELL}: {line}")),
+fn grid(line: &str) -> Result<Option<HashSet<String>>, String> {
+    let mut words = line.split_whitespace().skip(1);
+    if words.next().map(str::parse::<i64>) != Some(Ok(CELL)) {
+        return Err(format!("grid must be {CELL}: {line}"));
     }
+    match (words.next(), words.next()) {
+        (None, _) => Ok(None),
+        (Some("scope"), Some(ids)) => Ok(Some(ids.split(',').map(str::to_owned).collect())),
+        _ => Err(format!("not a grid header: {line}")),
+    }
+}
+
+fn merge(projected: &mut Canvas, original: &Canvas, scope: &HashSet<String>) {
+    let mut nodes: Vec<Node> = original
+        .nodes
+        .iter()
+        .filter_map(
+            |was| match projected.nodes.iter().find(|node| node.id == was.id) {
+                Some(node) => Some(node.clone()),
+                None => (!scope.contains(&was.id)).then(|| was.clone()),
+            },
+        )
+        .collect();
+    nodes.extend(
+        projected
+            .nodes
+            .iter()
+            .filter(|node| !original.nodes.iter().any(|was| was.id == node.id))
+            .cloned(),
+    );
+
+    let touches = |edge: &Edge| scope.contains(&edge.from_node) || scope.contains(&edge.to_node);
+    let mut edges: Vec<Edge> = original
+        .edges
+        .iter()
+        .filter_map(
+            |was| match projected.edges.iter().find(|edge| edge.id == was.id) {
+                Some(edge) => Some(edge.clone()),
+                None => (!touches(was)).then(|| was.clone()),
+            },
+        )
+        .collect();
+    edges.extend(
+        projected
+            .edges
+            .iter()
+            .filter(|edge| !original.edges.iter().any(|was| was.id == edge.id))
+            .cloned(),
+    );
+
+    projected.nodes = nodes;
+    projected.edges = edges;
 }
 
 fn node(line: &str, original: &Canvas) -> Result<Node, String> {
@@ -316,6 +421,10 @@ fn unescape(text: &str) -> String {
 mod tests {
     use super::*;
 
+    fn whole(canvas: &Canvas) -> String {
+        render(canvas, None).unwrap()
+    }
+
     fn canvas() -> Canvas {
         serde_json::from_str(include_str!(
             "../../core/tests/fixtures/kitchen-sink.canvas"
@@ -333,7 +442,7 @@ mod tests {
         canvas.nodes[1].x = 802;
         canvas.nodes[1].y = 998;
 
-        let projected = render(&canvas);
+        let projected = whole(&canvas);
         let lines: Vec<&str> = projected.lines().collect();
         assert_eq!(lines[0], "grid 20");
 
@@ -363,7 +472,7 @@ mod tests {
             serde_json::json!({"scripts": {"main": "fn on_click(id) { 1 }"}}),
         );
 
-        let projected = render(&canvas);
+        let projected = whole(&canvas);
         assert!(projected.contains("script main <kept>"), "{projected}");
         assert!(!projected.contains("on_click"), "{projected}");
     }
@@ -373,15 +482,12 @@ mod tests {
     #[test]
     fn a_round_trip_through_the_grid_settles() {
         let original = canvas();
-        let projected = render(&original);
+        let projected = whole(&original);
         let back = unproject(&projected, &original).unwrap();
 
-        assert_eq!(render(&back), projected);
+        assert_eq!(whole(&back), projected);
         assert_eq!(back.nodes.len(), original.nodes.len());
-        assert_eq!(
-            render(&unproject(&render(&back), &back).unwrap()),
-            projected
-        );
+        assert_eq!(whole(&unproject(&whole(&back), &back).unwrap()), projected);
     }
 
     #[test]
@@ -396,7 +502,7 @@ mod tests {
             .insert("mine".to_owned(), serde_json::json!(7));
         original.edges[0].to_end = Some(extboard_core::End::None);
 
-        let back = unproject(&render(&original), &original).unwrap();
+        let back = unproject(&whole(&original), &original).unwrap();
 
         assert_eq!(back.extra, original.extra);
         let node = back
@@ -411,7 +517,7 @@ mod tests {
     #[test]
     fn an_invented_id_is_rejected_by_id() {
         let original = canvas();
-        let mut projected = render(&original);
+        let mut projected = whole(&original);
         projected.push_str("edge e9 nope -> alsonope\n");
 
         let error = unproject(&projected, &original).unwrap_err();
@@ -442,7 +548,7 @@ mod tests {
             text: "## Day 1\n\na back\\slash and a | pipe".to_owned(),
         };
 
-        let back = unproject(&render(&original), &original).unwrap();
+        let back = unproject(&whole(&original), &original).unwrap();
         let node = back
             .nodes
             .iter()
@@ -451,13 +557,101 @@ mod tests {
         assert_eq!(node.kind, original.nodes[1].kind);
     }
 
+    // A 500 node board: two nodes in, a handful out, and the other 498
+    // untouched by the merge. The whole point of the flag.
+    #[test]
+    fn a_selection_cuts_the_board_down_and_merges_back() {
+        let mut big = Canvas {
+            nodes: (0..500)
+                .map(|n| Node {
+                    id: format!("n{n}"),
+                    x: (n % 25) * 400,
+                    y: (n / 25) * 300,
+                    width: 400,
+                    height: 300,
+                    color: None,
+                    kind: NodeKind::Text {
+                        text: format!("node {n}"),
+                    },
+                    extra: Default::default(),
+                })
+                .collect(),
+            edges: Vec::new(),
+            extra: Default::default(),
+        };
+        big.edges.push(Edge {
+            id: "e1".to_owned(),
+            from_node: "n7".to_owned(),
+            from_side: None,
+            from_end: None,
+            to_node: "n400".to_owned(),
+            to_side: None,
+            to_end: None,
+            label: None,
+            extra: Default::default(),
+        });
+
+        let selection = ["n7".to_owned(), "n8".to_owned()];
+        let projected = render(&big, Some(&selection)).unwrap();
+
+        // n7, n8, and n400 one hop away down the edge.
+        assert_eq!(projected.lines().count(), 5, "{projected}");
+        assert!(
+            projected.starts_with("grid 20 scope n7,n8\n"),
+            "{projected}"
+        );
+        assert!(projected.len() * 50 < whole(&big).len(), "no real cut");
+
+        let back = unproject(&projected, &big).unwrap();
+        assert_eq!(back.nodes.len(), 500);
+        assert_eq!(back.edges, big.edges);
+        assert_eq!(back.nodes, big.nodes, "the merge disturbed the rest");
+    }
+
+    #[test]
+    fn a_selection_adds_deletes_and_leaves_the_neighbour_alone() {
+        let original = canvas();
+        let ids: Vec<String> = original.nodes.iter().map(|node| node.id.clone()).collect();
+        let selection = [ids[2].clone()];
+
+        let projected = render(&original, Some(&selection)).unwrap();
+        // The selected node gone, a new one in its place, the neighbour and
+        // its edge left out of the text entirely.
+        let edited = projected
+            .lines()
+            .filter(|line| line.starts_with("grid") || !line.contains(&ids[2]))
+            .chain(["text fresh @99,99 10x2 | new"])
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let back = unproject(&edited, &original).unwrap();
+        let left: Vec<&String> = back.nodes.iter().map(|node| &node.id).collect();
+        assert!(
+            !left.contains(&&ids[2]),
+            "an omission in scope did not delete"
+        );
+        assert!(
+            left.contains(&&"fresh".to_owned()),
+            "a new node was dropped"
+        );
+        for id in [&ids[0], &ids[1], &ids[3]] {
+            assert!(left.contains(&id), "{id} went missing");
+        }
+    }
+
+    #[test]
+    fn a_selection_naming_nothing_is_an_error() {
+        let error = render(&canvas(), Some(&["ghost-42".to_owned()])).unwrap_err();
+        assert_eq!(error, "no node with id ghost-42");
+    }
+
     // The point of the whole exercise: a board worth reading, cheaply. Real
     // boards land near 3x; node text is the rest of the payload and no
     // projection can shrink it.
     #[test]
     fn costs_a_fraction_of_the_raw_json() {
         let canvas = canvas();
-        let projected = render(&canvas);
+        let projected = whole(&canvas);
         let raw = canvas.to_pretty_string();
         assert!(
             projected.len() * 5 < raw.len() * 2,
