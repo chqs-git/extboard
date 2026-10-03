@@ -1,13 +1,14 @@
 use crate::events::{Events, events, watch};
 use crate::store::{Store, StoreError};
 use crate::view;
-use axum::extract::{Path, State};
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::header::{CONTENT_TYPE, ETAG, IF_MATCH, IF_NONE_MATCH};
 use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use extboard_core::{Canvas, rev, validate};
+use extboard_core::{Canvas, is_font, is_image, rev, validate};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,6 +67,10 @@ fn router(state: AppState, dir: PathBuf) -> Router {
         .route("/api/spaces/{id}", put(put_space))
         .route("/api/spaces/{id}", post(create_space))
         .route("/api/events", get(events))
+        .route(
+            "/api/files/{name}",
+            post(upload).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)),
+        )
         .route("/v/{id}", get(view_space))
         .nest_service("/f", ServeDir::new(dir))
         .with_state(state)
@@ -128,6 +133,37 @@ async fn create_space(
     let saved = guard.save(&Canvas::default())?;
     app.events.emit(&id, &saved);
     Ok((StatusCode::CREATED, [(ETAG, format!("\"{saved}\""))]).into_response())
+}
+
+// A dropped photo off a phone, with room to spare.
+const UPLOAD_LIMIT: usize = 32 * 1024 * 1024;
+
+// The browser has no filesystem, so a file dropped on the board arrives here
+// as bytes. Native drops take the same route: one directory, one writer.
+async fn upload(
+    State(app): State<AppState>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Result<Response, StoreError> {
+    let Some(sub) = upload_dir(&name) else {
+        return Ok((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(serde_json::json!({ "error": format!("{name} is neither an image nor a font") })),
+        )
+            .into_response());
+    };
+    let file = app.store.put_file(sub, &name, &body)?;
+    Ok((StatusCode::CREATED, file).into_response())
+}
+
+// Which subdirectory a file belongs in, by what it is: a node's picture or the
+// space's typeface. Anything else has nowhere to go.
+fn upload_dir(name: &str) -> Option<&'static str> {
+    match name {
+        _ if is_image(name) => Some("images"),
+        _ if is_font(name) => Some("fonts"),
+        _ => None,
+    }
 }
 
 // write endpoints
@@ -270,6 +306,50 @@ mod tests {
                 .unwrap();
             assert_ne!(got.status(), StatusCode::OK, "{path} escaped the dir");
         }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // An upload is a write into the dir `/f` serves, so the same boundary
+    // holds: a name is one filename component and one of two kinds of file.
+    #[tokio::test]
+    async fn an_upload_lands_by_kind_never_overwrites_and_never_escapes() {
+        let root = std::env::temp_dir().join("extboard-upload-test");
+        let dir = root.join("spaces");
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = || router(state(dir.clone()), dir.clone());
+        let put = |path: &str| {
+            app().oneshot(
+                Request::post(path)
+                    .body(Body::from(b"\x89PNG".to_vec()))
+                    .unwrap(),
+            )
+        };
+        let body = async |response: Response| {
+            let bytes = axum::body::to_bytes(response.into_body(), 64)
+                .await
+                .unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        };
+
+        let first = put("/api/files/a%20b.png").await.unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(body(first).await, "images/a b.png");
+        // Same name, different photo: both land.
+        assert_eq!(
+            body(put("/api/files/a%20b.png").await.unwrap()).await,
+            "images/a b-1.png"
+        );
+        assert_eq!(
+            body(put("/api/files/x.ttf").await.unwrap()).await,
+            "fonts/x.ttf"
+        );
+
+        for name in ["x.exe", "x", ".ssh", "..%2fsecret.png"] {
+            let got = put(&format!("/api/files/{name}")).await.unwrap();
+            assert_ne!(got.status(), StatusCode::CREATED, "{name} was accepted");
+        }
+        assert!(!root.join("secret.png").exists());
 
         std::fs::remove_dir_all(&root).unwrap();
     }

@@ -6,6 +6,7 @@
 
 use extboard_core::{
     CIRCLE_SIDES, Canvas, End, Node, NodeKind, edge_ends, is_image, sides_inset, sides_polygon,
+    url_path,
 };
 use pulldown_cmark::{Event, Options, Parser};
 use std::fmt::Write;
@@ -268,20 +269,6 @@ fn safe_url(url: &str) -> Option<String> {
         )
         .then(|| url.to_owned()),
     }
-}
-
-// Enough percent-encoding for a filename in a URL path; `/` stays a separator.
-fn url_path(path: &str) -> String {
-    let mut out = String::new();
-    for byte in path.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
-                out.push(*byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
 }
 
 /// The trust boundary: everything that came out of a canvas file goes through

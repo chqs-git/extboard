@@ -36,8 +36,6 @@ const REACH_GRIP: f32 = ANCHOR_PX + 3.0;
 const REACH_HOVER: f32 = 56.0;
 const REACH_DRAG: f32 = 224.0;
 
-// Native only: a browser drop hands JS a `File` with no path.
-#[cfg(not(target_arch = "wasm32"))]
 mod drop;
 mod keys;
 
@@ -109,8 +107,13 @@ impl Plugin for EditPlugin {
             )
                 .chain(),
         );
+        app.init_resource::<drop::Uploads>()
+            .add_systems(Update, drop::landed.run_if(resource_exists::<Document>));
         #[cfg(not(target_arch = "wasm32"))]
-        app.add_systems(Update, drop::dropped.run_if(resource_exists::<Document>));
+        app.add_systems(Update, drop::dropped);
+        // The page's drop listener, installed once.
+        #[cfg(target_arch = "wasm32")]
+        app.add_systems(Startup, drop::listen);
     }
 }
 

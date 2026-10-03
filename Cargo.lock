@@ -2421,10 +2421,12 @@ dependencies = [
  "chrono",
  "ehttp",
  "extboard-core",
+ "js-sys",
  "naga",
  "pulldown-cmark",
  "rhai",
  "serde_json",
+ "wasm-bindgen",
  "web-sys",
 ]
 
