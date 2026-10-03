@@ -8,7 +8,7 @@ mod material;
 mod panel;
 
 pub use material::{Palette, PolygonMaterial, paint};
-use panel::{SidesField, SidesPanel};
+use panel::{Opened, SidesField};
 
 const RECT_SIDES: u8 = 4;
 const CIRCLE_WORDS: [&str; 4] = ["circle", "c", "o", "\u{221e}"];
@@ -24,7 +24,7 @@ enum Sides {
 impl Plugin for ShapePlugin {
     fn build(&self, app: &mut App) {
         material::register(app);
-        app.add_systems(
+        app.init_resource::<Opened>().add_systems(
             Update,
             (panel::sync, panel::typed)
                 .chain()
@@ -95,18 +95,6 @@ fn set_sides(document: &mut ResMut<Document>, id: &str, sides: Sides) {
     if node.sides != sides.key() {
         node.sides = sides.key();
     }
-}
-
-// A press that reaches the canvas clears the selection, which is this panel's
-// own node.
-pub fn over_panel(window: Single<&Window>, panels: Query<(), With<SidesPanel>>) -> bool {
-    if panels.is_empty() {
-        return false;
-    }
-    let Some(at) = window.cursor_position() else {
-        return false;
-    };
-    panel::holds(&window, at)
 }
 
 pub fn typing(focus: Res<InputFocus>, fields: Query<(), With<SidesField>>) -> bool {

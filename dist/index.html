@@ -9,8 +9,8 @@
      `rustc --target wasm32-unknown-unknown --print cfg` reports. -->
 
 <script type="module">
-import init, * as bindings from '/extboard-ui-691c9b15f13263de.js';
-const wasm = await init({ module_or_path: '/extboard-ui-691c9b15f13263de_bg.wasm' });
+import init, * as bindings from '/extboard-ui-f60a1880f5b2a1ab.js';
+const wasm = await init({ module_or_path: '/extboard-ui-f60a1880f5b2a1ab_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -25,6 +25,6 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
      aspect ratio and letterboxes inside the viewport. */
   canvas { display: block; width: 100%; height: 100%; }
 </style>
-<link rel="modulepreload" href="/extboard-ui-691c9b15f13263de.js" crossorigin="anonymous" integrity="sha384-Txl3ulgVti37frgWSsmhIE9AbKeF0nhW5ecRTJmxLIiOp6NPYJ8Toz9MByxyy82y"><link rel="preload" href="/extboard-ui-691c9b15f13263de_bg.wasm" crossorigin="anonymous" integrity="sha384-O+VtWuMvrQfZUnUco/qt1KJAr0ym3/TZB8ZLYL/JacmXPLNvoUO/su9rDoKbIrpH" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/extboard-ui-f60a1880f5b2a1ab.js" crossorigin="anonymous" integrity="sha384-jU2LKisKahFQ85/LIwJtrcXN2kn4XpuR2XSEgRVC7+c9j+cTMU/b1AefPmkLRr5c"><link rel="preload" href="/extboard-ui-f60a1880f5b2a1ab_bg.wasm" crossorigin="anonymous" integrity="sha384-iuiLRK3rgH8rBkQ2b3nzMzCIXDMf2Tj3fPnkzxMtO9FwY0WXaDzab8jpG1rZ82m8" as="fetch" type="application/wasm"></head>
 <body></body>
 </html>

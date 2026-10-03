@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use extboard_core::{Node as CanvasNode, NodeKind, PRIMARY_TEXT, TEXT, is_image, sides_inset};
+use extboard_core::{Node as CanvasNode, NodeKind, is_image, sides_inset, style};
 use std::collections::HashMap;
 
 use crate::camera::world_to_screen;
@@ -107,11 +107,17 @@ fn inside(
     parent: &mut ChildSpawnerCommands,
 ) {
     let open = editing.node() == Some(node.id.as_str());
+    // The text the node names and the colour it paints it, which is what its
+    // editor draws in too.
+    let face = theme.face(
+        style::font_role(&node.extra),
+        style::text_color(&node.extra),
+    );
     match (&node.kind, markdown(node)) {
         (_, Some(md)) if open => {
-            parent.spawn(editor(md, theme.color(TEXT), raster));
+            parent.spawn(editor(md, face.ink, raster));
         }
-        (_, Some(md)) => spawn_blocks(&blocks(md), theme, raster, parent),
+        (_, Some(md)) => spawn_blocks(&blocks(md), theme, &face, raster, parent),
         // The file is a path in the spaces dir, which is the asset root.
         (NodeKind::File { file, .. }, _) if is_image(file) => {
             parent.spawn((
@@ -126,11 +132,11 @@ fn inside(
             parent.spawn((
                 Text::new(label.clone()),
                 TextFont {
-                    font: theme.text_font(PRIMARY_TEXT),
-                    font_smoothing: theme.smoothing(),
+                    font: face.source.clone(),
+                    font_smoothing: face.smoothing,
                     ..TextFont::from_font_size(GROUP_SIZE * raster)
                 },
-                TextColor(theme.color(TEXT)),
+                TextColor(face.ink),
                 wrap(),
             ));
         }

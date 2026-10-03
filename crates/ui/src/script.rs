@@ -175,6 +175,9 @@ impl Plugin for ScriptPlugin {
         // one of those is a panic on the frames before the first load.
         app.insert_resource(Script::new())
             .init_resource::<Sidebar>()
+            // Cleared here when this panel opens, so it is made here too: a
+            // headless app may carry one of the two plugins and not the other.
+            .init_resource::<crate::theme::Open>()
             // `tick` writes it and `sync` reads it; either plugin may be the
             // one that got added, so neither assumes the other did this.
             .init_resource::<crate::sync::Ticked>()
@@ -757,6 +760,7 @@ fn toggle_sidebar(
     keys: Res<ButtonInput<KeyCode>>,
     document: Res<Document>,
     mut sidebar: ResMut<Sidebar>,
+    mut theme: ResMut<crate::theme::Open>,
 ) {
     // A node's own editor owns the keyboard: ctrl-E there is a keystroke, and in
     // ours escape is what ends the session before the panel can be put away.
@@ -767,6 +771,8 @@ fn toggle_sidebar(
     if !sidebar.open {
         return;
     }
+    // The theme panel is on the same edge; one of the two is up at a time.
+    theme.0 = false;
     sidebar.view = View::Editor;
     // Whatever it was last showing, if the document still has it.
     let scripts = scripts(&document.0);
@@ -1525,6 +1531,30 @@ mod tests {
         // And the exit button.
         assert!(matches!(open(View::Editor, true), Some(Target::Script(_))));
         assert_eq!(open(View::Editor, false), None);
+    }
+
+    // The theme panel is on the same edge, and this one covers the whole of it.
+    #[test]
+    fn opening_the_sidebar_closes_the_theme_panel() {
+        let mut app = App::new();
+        app.add_plugins(ScriptPlugin)
+            .init_resource::<Editing>()
+            .init_resource::<InputFocus>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .insert_resource(Document(canvas()));
+        app.world_mut().resource_mut::<crate::theme::Open>().0 = true;
+
+        let mut input = ButtonInput::default();
+        input.press(KeyCode::ControlLeft);
+        input.press(KeyCode::KeyE);
+        app.world_mut().insert_resource(input);
+        app.world_mut().run_schedule(Update);
+
+        assert!(app.world().resource::<Sidebar>().open, "the panel is up");
+        assert!(
+            !app.world().resource::<crate::theme::Open>().0,
+            "and it is alone"
+        );
     }
 
     // Only the editor view wants the keyboard, which is what lets `swallow` eat a

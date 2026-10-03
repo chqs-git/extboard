@@ -69,6 +69,7 @@ fn identical_documents_built_differently_have_equal_revs() {
             to_side: Some(Side::Left),
             to_end: None,
             label: None,
+            color: None,
             extra: Map::new(),
         }],
         extra: Map::new(),

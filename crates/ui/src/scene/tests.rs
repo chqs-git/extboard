@@ -29,6 +29,7 @@ fn canvas() -> Canvas {
         to_side: None,
         to_end: None,
         label: None,
+        color: None,
         extra: Default::default(),
     };
     Canvas {

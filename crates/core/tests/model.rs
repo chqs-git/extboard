@@ -2,7 +2,7 @@
 //! that actually proves the no-data-loss claim — parsing alone is happy to
 //! drop a key it never looked at.
 
-use extboard_core::{CIRCLE_SIDES, Canvas, MIN_SIDES, NodeKind};
+use extboard_core::{CIRCLE_SIDES, Canvas, MIN_SIDES, NodeKind, style};
 
 const FIXTURES: [(&str, &str); 4] = [
     ("simple", include_str!("fixtures/simple.canvas")),
@@ -111,4 +111,27 @@ fn sides_are_clamped_on_the_way_in() {
         sides,
         vec![Some(CIRCLE_SIDES), None, Some(CIRCLE_SIDES - 1), None]
     );
+}
+
+// The configure panel's keys: the spec's colour on an edge, and the three of
+// ours that ride in the extras.
+#[test]
+fn a_style_survives_the_file() {
+    let src = r#"{"nodes":[
+            {"id":"a","x":0,"y":0,"width":10,"height":10,"type":"text","text":"",
+             "outlineColor":"3","textColor":"5","strokeWidth":3,"font":"secondary"}
+        ],"edges":[
+            {"id":"e","fromNode":"a","toNode":"a","color":"4","strokeWidth":1}
+        ]}"#;
+    let canvas: Canvas = serde_json::from_str(src).unwrap();
+    let node = &canvas.nodes[0].extra;
+    assert_eq!(style::outline_color(node), Some("3"));
+    assert_eq!(style::text_color(node), Some("5"));
+    assert_eq!(style::stroke_width(node), Some(3));
+    assert_eq!(style::font_role(node), Some(1));
+    assert_eq!(canvas.edges[0].color.as_deref(), Some("4"));
+    assert_eq!(style::stroke_width(&canvas.edges[0].extra), Some(1));
+
+    let back: Canvas = serde_json::from_str(&canvas.to_pretty_string()).unwrap();
+    assert_eq!(back, canvas);
 }

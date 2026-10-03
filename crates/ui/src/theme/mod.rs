@@ -8,12 +8,14 @@ use bevy::shader::ShaderRef;
 use bevy::text::{EditableText, Font, FontCx, FontSmoothing, TextCursorStyle, TextEdit};
 use bevy::ui_widgets::{ControlOrientation, ScrollArea, Scrollbar, ScrollbarThumb};
 use extboard_core::{
-    DEFAULT_FONT, FONT_ROLES, Fonts, MAX_COLORS, MIN_COLORS, PRESETS, PRIMARY_TEXT, Theme as Block,
-    is_font,
+    DEFAULT_FONT, FONT_ROLES, Fonts, MAX_COLORS, MIN_COLORS, PRESETS, PRIMARY_TEXT, TEXT,
+    Theme as Block, is_font,
 };
 
 use crate::client::Document;
 use crate::edit::command;
+use crate::script::Sidebar;
+use crate::select::PanelRoot;
 
 // A board with no theme at all has to draw as something, and this is the first
 // preset's background: the one colour that exists before the document loads.
@@ -24,13 +26,15 @@ pub const DARK: Color = Color::srgb(0.102, 0.106, 0.149);
 // weight is the classifier, which is why no space has to declare one.
 const PIXEL_BYTES: usize = 75 * 1024;
 
-const LEFT: f32 = 8.0;
-const TOP: f32 = 30.0;
+// The right edge: the configure panel has the left one, and the script sidebar
+// is why only one of the two of them is up at a time.
+const RIGHT: f32 = 8.0;
+pub(crate) const TOP: f32 = 30.0;
 const WIDTH: f32 = 236.0;
-const PAD: f32 = 8.0;
-const ROW: f32 = 18.0;
-const SWATCH: f32 = 14.0;
-const LABEL_SIZE: f32 = 11.0;
+pub(crate) const PAD: f32 = 8.0;
+pub(crate) const ROW: f32 = 18.0;
+pub(crate) const SWATCH: f32 = 14.0;
+pub(crate) const LABEL_SIZE: f32 = 11.0;
 // Seven rows of themes shows every preset; both lists scroll past their cap.
 const THEMES_H: f32 = 7.0 * (ROW + 2.0);
 const COLORS_H: f32 = 9.0 * (ROW + 2.0);
@@ -44,11 +48,11 @@ const PLANE_H: f32 = 108.0;
 const STRIP_H: f32 = 12.0;
 const KNOB: f32 = 10.0;
 const KNOB_EDGE: f32 = 2.0;
-const PANEL_BG: Color = Color::srgb(0.08, 0.09, 0.11);
-const FIELD_BG: Color = Color::srgb(0.06, 0.07, 0.09);
+pub(crate) const PANEL_BG: Color = Color::srgb(0.08, 0.09, 0.11);
+pub(crate) const FIELD_BG: Color = Color::srgb(0.06, 0.07, 0.09);
 const ROW_ON: Color = Color::srgb(0.20, 0.24, 0.33);
-const FG: Color = Color::srgb(0.86, 0.88, 0.92);
-const LABEL: Color = Color::srgb(0.5, 0.55, 0.62);
+pub(crate) const FG: Color = Color::srgb(0.86, 0.88, 0.92);
+pub(crate) const LABEL: Color = Color::srgb(0.5, 0.55, 0.62);
 // An edit the library does not have yet. The same amber the selection ring uses.
 const UNSAVED: Color = Color::srgb(0.95, 0.75, 0.30);
 const RAIL_BG: Color = Color::srgb(0.12, 0.13, 0.16);
@@ -64,6 +68,16 @@ pub struct Theme {
     saved: Vec<Block>,
     pub fonts: Fonts,
     loaded: Vec<Loaded>,
+}
+
+// What one text draws in: the face, whether its glyphs are smoothed -- a pixel
+// font wants that off -- and the colour. A node naming a text of its own and a
+// node painting one carry both the same way.
+#[derive(Clone, Default)]
+pub struct Face {
+    pub source: FontSource,
+    pub smoothing: FontSmoothing,
+    pub ink: Color,
 }
 
 // One font of the library, resolved.
@@ -91,7 +105,7 @@ enum Named {
 }
 
 #[derive(Resource, Default)]
-struct Open(bool);
+pub(crate) struct Open(pub(crate) bool);
 
 // The naming window, open with the name it is offering. A new theme needs a
 // name before it can exist, and this is where one is typed.
@@ -216,6 +230,9 @@ impl Plugin for ThemePlugin {
         }
         app.init_resource::<Theme>()
             .init_resource::<Open>()
+            // Written here when the panel opens, so it is made here too: a
+            // headless app may carry one of the two plugins and not the other.
+            .init_resource::<Sidebar>()
             .init_resource::<Naming>()
             .init_resource::<Picking>()
             .init_resource::<Targeting>()
@@ -264,13 +281,40 @@ impl Theme {
             .unwrap_or_default()
     }
 
+    // The spec's colour field, which a node and an edge both carry, and the
+    // form a stroke takes too: a preset index is a slot in this palette, so a
+    // retheme moves everything carrying one, and `#rrggbb` stays a literal.
+    // Anything else -- including no colour at all -- is the role asked for.
+    pub fn paint(&self, color: Option<&str>, fallback: usize) -> Color {
+        let Some(color) = color else {
+            return self.color(fallback);
+        };
+        match color.parse::<usize>() {
+            Ok(slot) => self.color(slot),
+            Err(_) => hex(color).unwrap_or_else(|| self.color(fallback)),
+        }
+    }
+
+    // How a node's text is drawn: the face of the text it names -- the primary
+    // one when it names none -- in the colour it is painted.
+    pub fn face(&self, role: Option<usize>, color: Option<&str>) -> Face {
+        let name = self.fonts.font(role.unwrap_or(PRIMARY_TEXT));
+        Face {
+            source: name.map(|name| self.source(name)).unwrap_or_default(),
+            smoothing: self.smoothing_of(name),
+            ink: self.paint(color, TEXT),
+        }
+    }
+
     // Every text on the board is rasterized this way, and the atlas is sampled
     // to match: `None` is a nearest sampler as well as a hard edge. A pixel font
     // wants both, and it is classified rather than declared: see `PIXEL_BYTES`.
     pub fn smoothing(&self) -> FontSmoothing {
-        let pixel = self
-            .fonts
-            .font(PRIMARY_TEXT)
+        self.smoothing_of(self.fonts.font(PRIMARY_TEXT))
+    }
+
+    fn smoothing_of(&self, name: Option<&str>) -> FontSmoothing {
+        let pixel = name
             .and_then(|name| self.entry(name))
             .and_then(|loaded| loaded.bytes)
             .is_some_and(|bytes| bytes < PIXEL_BYTES);
@@ -280,7 +324,7 @@ impl Theme {
         }
     }
 
-    fn source(&self, name: &str) -> FontSource {
+    pub(crate) fn source(&self, name: &str) -> FontSource {
         self.entry(name)
             .map(|loaded| loaded.source.clone())
             .unwrap_or_default()
@@ -446,11 +490,15 @@ fn toggle(
     mut open: ResMut<Open>,
     mut picking: ResMut<Picking>,
     mut targeting: ResMut<Targeting>,
+    mut sidebar: ResMut<Sidebar>,
 ) {
     if command(&keys) && keys.just_pressed(KeyCode::KeyT) {
         open.0 = !open.0;
         picking.0 = None;
         targeting.0 = None;
+        // Both live on the right edge, so the one being opened puts the other
+        // away rather than drawing over it.
+        sidebar.open &= !open.0;
     }
 }
 
@@ -469,7 +517,7 @@ fn shortcuts(
 }
 
 // An ordinary document change, so the save debounces and undo picks it up.
-fn write(document: &mut ResMut<Document>, theme: &Block) {
+pub(crate) fn write(document: &mut ResMut<Document>, theme: &Block) {
     if &document.0.stored_theme() != theme {
         document.0.set_theme(theme);
     }
@@ -595,12 +643,13 @@ fn spawn(
     commands
         .spawn((
             panel,
+            PanelRoot,
             // Over the node panels, which order themselves from 0 up, and under
             // the script sidebar at 2.
             GlobalZIndex(3),
             Node {
                 position_type: PositionType::Absolute,
-                left: px(LEFT),
+                right: px(RIGHT),
                 top: px(TOP),
                 width: px(WIDTH),
                 padding: UiRect::all(px(PAD)),
@@ -659,7 +708,7 @@ fn spawn(
 }
 
 // `ScrollArea` is what the wheel reaches and `Scrollbar` what the pointer drags.
-fn list(
+pub(crate) fn list(
     parent: &mut ChildSpawnerCommands,
     height: f32,
     rows: impl FnOnce(&mut ChildSpawnerCommands),
@@ -877,12 +926,12 @@ fn candidates(parent: &mut ChildSpawnerCommands, theme: &Theme, role: usize) {
     });
 }
 
-fn row_bg(on: bool) -> Color {
+pub(crate) fn row_bg(on: bool) -> Color {
     if on { ROW_ON } else { Color::NONE }
 }
 
 // Drawn in the font it names, which is the only preview a font needs.
-fn font_tag(theme: &Theme, name: Option<&str>) -> impl Bundle {
+pub(crate) fn font_tag(theme: &Theme, name: Option<&str>) -> impl Bundle {
     let (shown, color) = match name {
         Some(name) => (font_label(name), FG),
         None => ("none", LABEL),
@@ -899,7 +948,7 @@ fn font_tag(theme: &Theme, name: Option<&str>) -> impl Bundle {
 
 // The library holds a path and the row is 236px wide, so a row shows the file
 // and not the folder it is in. A family name has neither and comes through.
-fn font_label(name: &str) -> &str {
+pub(crate) fn font_label(name: &str) -> &str {
     let file = name.rsplit('/').next().unwrap_or(name);
     file.rsplit_once('.').map_or(file, |(stem, _)| stem)
 }
@@ -1023,7 +1072,7 @@ fn knob_at(at: Vec2) -> Node {
     }
 }
 
-fn code(color: Color) -> String {
+pub(crate) fn code(color: Color) -> String {
     let rgb = color.to_srgba();
     let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
     format!(
@@ -1034,14 +1083,14 @@ fn code(color: Color) -> String {
     )
 }
 
-fn heading(text: &str) -> impl Bundle {
+pub(crate) fn heading(text: &str) -> impl Bundle {
     (
         Text::new(text.to_owned()),
         TextFont::from_font_size(LABEL_SIZE),
     )
 }
 
-fn tag(text: &str, color: Color) -> impl Bundle {
+pub(crate) fn tag(text: &str, color: Color) -> impl Bundle {
     (
         Text::new(text.to_owned()),
         TextFont::from_font_size(LABEL_SIZE),
@@ -1049,7 +1098,7 @@ fn tag(text: &str, color: Color) -> impl Bundle {
     )
 }
 
-fn row() -> Node {
+pub(crate) fn row() -> Node {
     Node {
         height: px(ROW),
         padding: UiRect::horizontal(px(4.0)),
@@ -1060,7 +1109,7 @@ fn row() -> Node {
     }
 }
 
-fn field_box(width: Val) -> impl Bundle {
+pub(crate) fn field_box(width: Val) -> impl Bundle {
     (
         Node {
             width,
@@ -1072,7 +1121,7 @@ fn field_box(width: Val) -> impl Bundle {
     )
 }
 
-fn editable(value: &str) -> EditableText {
+pub(crate) fn editable(value: &str) -> EditableText {
     EditableText {
         allow_newlines: false,
         ..EditableText::new(value)
@@ -1081,7 +1130,7 @@ fn editable(value: &str) -> EditableText {
 
 // The editor holds its own font size, and bevy pushes `TextFont` into it only
 // when that component changes: replacing the editor leaves it at 100px.
-fn set_text(field: &mut EditableText, value: &str) {
+pub(crate) fn set_text(field: &mut EditableText, value: &str) {
     field.editor_mut().set_text(value);
     field.queue_edit(TextEdit::TextEnd(false));
 }
@@ -1196,6 +1245,7 @@ fn prompt(
 fn spawn_prompt(commands: &mut Commands, offered: &str) {
     commands.spawn((
         NamePrompt,
+        PanelRoot,
         GlobalZIndex(4),
         Node {
             position_type: PositionType::Absolute,
@@ -1394,7 +1444,7 @@ fn typed(
 }
 
 // `#` and six hex digits, no more. The hash is the box's own and never leaves.
-fn clamped(typed: &str) -> String {
+pub(crate) fn clamped(typed: &str) -> String {
     let mut code = String::with_capacity(7);
     code.push('#');
     code.extend(typed.chars().filter(char::is_ascii_hexdigit).take(6));
@@ -1408,21 +1458,6 @@ fn shown(theme: &Theme, which: Field) -> Option<&str> {
         Field::Color(slot) => Some(theme.live.color(slot).unwrap_or_default()),
         Field::New => None,
     }
-}
-
-// A press that reaches the canvas clears the selection, and one on the panel is
-// not. The cursor is logical where a `ComputedNode` is physical.
-pub fn over_panel(
-    window: Single<&Window>,
-    panels: Query<(&ComputedNode, &UiGlobalTransform), With<ThemePanel>>,
-) -> bool {
-    let Ok((panel, transform)) = panels.single() else {
-        return false;
-    };
-    let Some(at) = window.cursor_position() else {
-        return false;
-    };
-    panel.contains_point(*transform, at / panel.inverse_scale_factor())
 }
 
 pub fn typing(focus: Res<InputFocus>, fields: Query<(), With<Field>>) -> bool {
