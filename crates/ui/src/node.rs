@@ -1,8 +1,14 @@
 use bevy::prelude::*;
 
 use crate::client::Document;
+use crate::select::Selected;
 
 pub struct NodePlugin;
+
+// The frame's rebuild. Anything that picks an entity and then writes to it runs
+// after this, or it writes to one already on its way out, which is a panic.
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Respawn;
 
 #[derive(Component)]
 pub struct NodeId(pub String);
@@ -27,7 +33,9 @@ impl Plugin for NodePlugin {
         app.add_systems(
             Update,
             (
-                spawn_nodes.run_if(resource_exists_and_changed::<Document>),
+                spawn_nodes
+                    .in_set(Respawn)
+                    .run_if(resource_exists_and_changed::<Document>),
                 place_nodes.run_if(resource_exists::<Document>),
             ),
         );
@@ -46,17 +54,21 @@ pub fn to_canvas(center: Vec2, size: Vec2) -> Vec2 {
 fn spawn_nodes(
     mut commands: Commands,
     document: Res<Document>,
-    existing: Query<Entity, With<NodeId>>,
+    existing: Query<(Entity, &NodeId, Has<Selected>)>,
 ) {
-    // despawn-all then respawn-all.
-    for entity in &existing {
+    // The selection is carried across, or a tick script's write takes it.
+    let mut selected: Vec<&str> = Vec::new();
+    for (entity, id, picked) in &existing {
+        if picked {
+            selected.push(id.0.as_str());
+        }
         commands.entity(entity).despawn();
     }
 
     // The model of a node, not its picture: where it is and how big, for hit
     // testing and for the panel that draws it.
     for node in &document.0.nodes {
-        commands.spawn((
+        let mut spawned = commands.spawn((
             NodeId(node.id.clone()),
             NodeRect {
                 w: node.width,
@@ -65,6 +77,9 @@ fn spawn_nodes(
             NodeKind(node.kind.clone()),
             placement(node),
         ));
+        if selected.contains(&node.id.as_str()) {
+            spawned.insert(Selected);
+        }
     }
 }
 
@@ -98,6 +113,16 @@ fn placement(node: &extboard_core::Node) -> Transform {
 // it. All within (-1, 0), leaving z=1 for edge labels.
 pub fn depth(node: &extboard_core::Node) -> f32 {
     -(node.width as f32 * node.height as f32) / 1.0e6
+}
+
+// A group is a container: what sits inside it, edges included, shows through.
+const GROUP_ALPHA: f32 = 0.45;
+
+pub fn body_color(node: &extboard_core::Node) -> Color {
+    match node.kind {
+        extboard_core::NodeKind::Group { .. } => node_color(node).with_alpha(GROUP_ALPHA),
+        _ => node_color(node),
+    }
 }
 
 // The spec's colour field if the node carries one, and otherwise enough of a
@@ -146,6 +171,27 @@ fn kind_color(kind: &extboard_core::NodeKind) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_group_lets_what_is_inside_it_show_through() {
+        let node = |kind| extboard_core::Node {
+            id: "n".to_owned(),
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            color: None,
+            sides: None,
+            kind,
+            extra: serde_json::Map::new(),
+        };
+        let group = body_color(&node(extboard_core::NodeKind::Group { label: None }));
+        let text = body_color(&node(extboard_core::NodeKind::Text {
+            text: String::new(),
+        }));
+        assert!(group.alpha() < 1.0, "a group has to be see-through");
+        assert_eq!(text.alpha(), 1.0, "everything else has to cover");
+    }
 
     #[test]
     fn a_colour_is_a_preset_index_a_hex_code_or_neither() {

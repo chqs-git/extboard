@@ -41,6 +41,7 @@ fn canvas() -> Canvas {
             width: 200,
             height: 100,
             color: None,
+            sides: None,
             kind: extboard_core::NodeKind::Text {
                 text: String::new(),
             },

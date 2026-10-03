@@ -13,10 +13,11 @@
 use extboard_core::{Canvas, Node};
 use serde_json::Value;
 
-const FIXTURES: [(&str, &str); 3] = [
+const FIXTURES: [(&str, &str); 4] = [
     ("simple", include_str!("fixtures/simple.canvas")),
     ("unknown-keys", include_str!("fixtures/unknown-keys.canvas")),
     ("kitchen-sink", include_str!("fixtures/kitchen-sink.canvas")),
+    ("shapes", include_str!("fixtures/shapes.canvas")),
 ];
 
 fn parse(name: &str, src: &str) -> Canvas {

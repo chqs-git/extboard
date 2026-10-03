@@ -1,0 +1,11 @@
+{
+	"nodes":[
+		{"id":"1c0ffee5ba5eba11","x":-400,"y":-120,"width":240,"height":240,"type":"text","text":"a hexagon with words in it","sides":6},
+		{"id":"2ca11ab1e0ddba11","x":-80,"y":-120,"width":240,"height":240,"color":"5","type":"text","text":"round","sides":10},
+		{"id":"3deadbeefb0a710c","x":240,"y":-120,"width":240,"height":240,"type":"link","url":"https://jsoncanvas.org","sides":3},
+		{"id":"4b0a710cdeadbeef","x":-80,"y":200,"width":250,"height":60,"type":"text","text":"a plain rect, no sides key"}
+	],
+	"edges":[
+		{"id":"5e0f1aa9c0ffee11","fromNode":"1c0ffee5ba5eba11","fromSide":"right","toNode":"3deadbeefb0a710c","toSide":"left"}
+	]
+}

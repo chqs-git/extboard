@@ -1,18 +1,17 @@
 use bevy::prelude::*;
-use extboard_core::{Node as CanvasNode, NodeKind};
+use extboard_core::{Node as CanvasNode, NodeKind, sides_inset};
 use std::collections::HashMap;
 
 use crate::camera::world_to_screen;
 use crate::client::Document;
-use crate::node::{NodeId, NodeRect, depth, node_color};
+use crate::node::{NodeId, NodeRect, depth};
 use crate::select::{OUTLINE, Selected};
+use crate::shape::{Palette, PolygonMaterial, paint};
 
 use super::edit_text::{Editing, editor, label_editor};
 use super::{GROUP_LABEL, GROUP_SIZE, PADDING, ROW_GAP, blocks, markdown, spawn_blocks, wrap};
 
 const OUTLINE_PX: f32 = 2.0;
-// A group is a container: what sits inside it, edges included, shows through.
-const GROUP_ALPHA: f32 = 0.45;
 
 // The node's body: its fill, its clip box and whatever is drawn inside it. UI
 // rather than a mesh, because the text is UI and the UI pass runs after the
@@ -30,6 +29,8 @@ pub(super) fn spawn_panels(
     mut commands: Commands,
     document: Res<Document>,
     editing: Res<Editing>,
+    mut palette: ResMut<Palette>,
+    mut materials: ResMut<Assets<PolygonMaterial>>,
     existing: Query<Entity, With<Panel>>,
 ) {
     for entity in &existing {
@@ -48,7 +49,7 @@ pub(super) fn spawn_panels(
                     overflow: Overflow::clip(),
                     ..default()
                 },
-                BackgroundColor(fill(node)),
+                MaterialNode(paint(&mut palette, &mut materials, node)),
                 // Hidden rather than absent: toggling the component would move
                 // the panel between tables on every selection change.
                 Outline::new(px(OUTLINE_PX), px(0.0), Color::NONE),
@@ -65,7 +66,7 @@ pub(super) fn spawn_panels(
                             top: px(0.0),
                             width: px(size.x),
                             height: px(size.y),
-                            padding: UiRect::all(px(PADDING)),
+                            padding: content_padding(node.sides, size),
                             flex_direction: FlexDirection::Column,
                             row_gap: px(ROW_GAP),
                             ..default()
@@ -105,14 +106,9 @@ fn inside(node: &CanvasNode, editing: &Editing, parent: &mut ChildSpawnerCommand
     }
 }
 
-// A group's fill is translucent so its contents read as inside it; everything
-// else is opaque, which is the whole point of drawing the body here.
-pub(super) fn fill(node: &CanvasNode) -> Color {
-    let color = node_color(node);
-    match node.kind {
-        NodeKind::Group { .. } => color.with_alpha(GROUP_ALPHA),
-        _ => color,
-    }
+fn content_padding(sides: Option<u8>, size: Vec2) -> UiRect {
+    let inset = sides_inset(sides);
+    UiRect::axes(px(PADDING + inset * size.x), px(PADDING + inset * size.y))
 }
 
 // The label editor is spawned outside any panel: it is a fixed screen-sized box
@@ -135,15 +131,24 @@ pub(super) fn spawn_label_editor(
 
 pub(super) fn track_panels(
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
+    document: Res<Document>,
     nodes: Query<(&NodeId, &Transform, &NodeRect)>,
-    mut panels: Query<(&Panel, &mut Node)>,
-    mut contents: Query<(&Content, &mut UiTransform)>,
+    mut palette: ResMut<Palette>,
+    mut materials: ResMut<Assets<PolygonMaterial>>,
+    mut panels: Query<(&Panel, &mut Node, &mut MaterialNode<PolygonMaterial>)>,
+    mut contents: Query<(&Content, &mut UiTransform, &mut Node), Without<Panel>>,
 ) {
     let (camera, cam_global, projection) = *camera;
     let Projection::Orthographic(ortho) = projection else {
         return;
     };
     let zoom = 1.0 / ortho.scale;
+    let current: HashMap<&str, &CanvasNode> = document
+        .0
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
     let placed: HashMap<&str, (Vec2, Vec2)> = nodes
         .iter()
         .map(|(id, transform, rect)| {
@@ -154,10 +159,18 @@ pub(super) fn track_panels(
         })
         .collect();
 
-    for (panel, mut node) in &mut panels {
+    for (panel, mut node, mut material) in &mut panels {
         let Some(&(center, size)) = placed.get(panel.0.as_str()) else {
             continue;
         };
+        // Here rather than at spawn: the slider and a resize drag both change
+        // what a panel draws without waking the document.
+        if let Some(&node) = current.get(panel.0.as_str()) {
+            let want = paint(&mut palette, &mut materials, node);
+            if material.0 != want {
+                material.0 = want;
+            }
+        }
         let Some(screen) = world_to_screen(camera, cam_global, center) else {
             continue;
         };
@@ -174,10 +187,15 @@ pub(super) fn track_panels(
         }
     }
 
-    for (content, mut transform) in &mut contents {
+    for (content, mut transform, mut node) in &mut contents {
         let Some(&(_, size)) = placed.get(content.0.as_str()) else {
             continue;
         };
+        let sides = current.get(content.0.as_str()).and_then(|node| node.sides);
+        let want = content_padding(sides, size);
+        if node.padding != want {
+            node.padding = want;
+        }
         let offset = centre_scale_offset(size, zoom);
         let want = UiTransform {
             scale: Vec2::splat(zoom),

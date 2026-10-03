@@ -2415,6 +2415,7 @@ dependencies = [
  "chrono",
  "ehttp",
  "extboard-core",
+ "naga",
  "pulldown-cmark",
  "rhai",
  "serde_json",

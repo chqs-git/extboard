@@ -52,7 +52,13 @@ impl Plugin for SelectPlugin {
             // and no band can exist while one is open.
             .add_systems(
                 Update,
-                (press.run_if(not(crate::text::editing)), drag_band, release).chain(),
+                (
+                    press.run_if(not(crate::text::editing).and_then(not(crate::shape::over_panel))),
+                    drag_band,
+                    release,
+                )
+                    .chain()
+                    .after(crate::node::Respawn),
             );
     }
 }

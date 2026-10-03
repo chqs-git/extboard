@@ -1,4 +1,4 @@
-use extboard_core::{Canvas, Edge, Node, NodeKind, Side, validate};
+use extboard_core::{Canvas, Edge, Node, NodeKind, Side, sides_of, validate};
 use serde_json::Value;
 use std::collections::HashSet;
 
@@ -101,6 +101,9 @@ fn node_line(node: &Node) -> String {
     );
     if let Some(color) = &node.color {
         line.push_str(&format!(" c={color}"));
+    }
+    if let Some(sides) = node.sides {
+        line.push_str(&format!(" s={sides}"));
     }
     let payload = payload(&node.kind);
     if !payload.is_empty() {
@@ -291,16 +294,30 @@ fn node(line: &str, original: &Canvas) -> Result<Node, String> {
     let was = original.nodes.iter().find(|node| node.id == id);
     let kind = kind_of(kind, &payload, was)?;
 
+    let mut color = None;
+    let mut sides = None;
+    for word in words {
+        if let Some(value) = word.strip_prefix("c=") {
+            color = Some(value.to_owned());
+        } else if let Some(value) = word.strip_prefix("s=") {
+            sides = Some(
+                value
+                    .parse()
+                    .map_err(|_| format!("{value} is not a side count"))?,
+            );
+        } else {
+            return Err(format!("{word} is not c=colour or s=sides"));
+        }
+    }
+
     Ok(Node {
         id: id.to_owned(),
         x: units(x),
         y: units(y),
         width: units(width),
         height: units(height),
-        color: words
-            .next()
-            .and_then(|word| word.strip_prefix("c="))
-            .map(str::to_owned),
+        color,
+        sides: sides_of(sides),
         kind,
         extra: was.map(|node| node.extra.clone()).unwrap_or_default(),
     })
@@ -420,6 +437,7 @@ fn unescape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use extboard_core::CIRCLE_SIDES;
 
     fn whole(canvas: &Canvas) -> String {
         render(canvas, None).unwrap()
@@ -533,11 +551,35 @@ mod tests {
             ("grid 7", "grid must be 20"),
             ("text n1 @zero,0 2x2", "is not @col,row"),
             ("blob n1 @0,0 2x2", "is not a node type"),
+            ("text n1 @0,0 2x2 s=lots", "is not a side count"),
+            ("text n1 @0,0 2x2 wat=1", "is not c=colour or s=sides"),
             ("edge e1 a -> b:sideways", "is not a side"),
         ] {
             let error = unproject(&format!("grid 20\n{line}\n"), &original).unwrap_err();
             assert!(error.starts_with("line 2:"), "{line}: {error}");
             assert!(error.contains(expected), "{line}: {error}");
+        }
+    }
+
+    #[test]
+    fn sides_travel_beside_the_colour() {
+        let mut original = canvas();
+        original.nodes[1].sides = Some(7);
+        original.nodes[0].sides = Some(CIRCLE_SIDES);
+
+        let projected = whole(&original);
+        assert!(projected.contains(" s=7"), "{projected}");
+        assert!(projected.contains(" s=10"), "{projected}");
+
+        let back = unproject(&projected, &original).unwrap();
+        for i in [0, 1] {
+            let node = back
+                .nodes
+                .iter()
+                .find(|node| node.id == original.nodes[i].id)
+                .unwrap();
+            assert_eq!(node.sides, original.nodes[i].sides);
+            assert_eq!(node.kind, original.nodes[i].kind, "the kind changed");
         }
     }
 
@@ -570,6 +612,7 @@ mod tests {
                     width: 400,
                     height: 300,
                     color: None,
+                    sides: None,
                     kind: NodeKind::Text {
                         text: format!("node {n}"),
                     },

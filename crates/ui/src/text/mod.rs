@@ -66,7 +66,12 @@ impl Plugin for TextPlugin {
             // projection this reads are a frame stale. Before Layout: it writes `Node`.
             .add_systems(
                 PostUpdate,
-                (track_panels, track_label, outline_panels)
+                (
+                    // The document arrives a fetch later than the first frame.
+                    track_panels.run_if(resource_exists::<Document>),
+                    track_label,
+                    outline_panels,
+                )
                     .after(TransformSystems::Propagate)
                     .after(CameraUpdateSystems)
                     .before(UiSystems::Layout),

@@ -81,7 +81,7 @@ impl Plugin for EditPlugin {
             Update,
             (
                 (
-                    grab,
+                    grab.run_if(not(crate::shape::over_panel)),
                     apply.run_if(resource_exists::<Document>),
                     anchors,
                     connect.run_if(resource_exists::<Document>),
@@ -96,7 +96,11 @@ impl Plugin for EditPlugin {
                     keys::duplicate,
                     keys::group,
                 )
-                    .run_if(resource_exists::<Document>.and_then(not(crate::text::editing))),
+                    .run_if(
+                        resource_exists::<Document>
+                            .and_then(not(crate::text::editing))
+                            .and_then(not(crate::shape::typing)),
+                    ),
                 cursor,
             )
                 .chain(),
@@ -393,6 +397,7 @@ pub(super) fn added(canvas: &mut Canvas, seed: u32, rect: Rect, kind: NodeKind) 
             width: rect.width().round() as i64,
             height: rect.height().round() as i64,
             color: None,
+            sides: None,
             kind,
             extra: default(),
         })

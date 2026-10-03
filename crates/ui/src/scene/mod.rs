@@ -31,7 +31,9 @@ impl Plugin for ScenePlugin {
         app.add_systems(
             Update,
             (
-                spawn_edges.run_if(resource_exists_and_changed::<Document>),
+                spawn_edges
+                    .in_set(crate::node::Respawn)
+                    .run_if(resource_exists_and_changed::<Document>),
                 // Every frame, like the edges themselves: a drag moves nodes
                 // without waking change detection, and the label has to keep up.
                 place_edges.run_if(resource_exists::<Document>),
@@ -76,9 +78,13 @@ fn draw_edges(
 fn spawn_edges(
     mut commands: Commands,
     document: Res<Document>,
-    existing: Query<Entity, With<EdgeId>>,
+    existing: Query<(Entity, &EdgeId, Has<Selected>)>,
 ) {
-    for entity in &existing {
+    let mut selected: Vec<&str> = Vec::new();
+    for (entity, id, picked) in &existing {
+        if picked {
+            selected.push(id.0.as_str());
+        }
         commands.entity(entity).despawn();
     }
 
@@ -88,6 +94,9 @@ fn spawn_edges(
             EdgeId(edge.id.clone()),
             Transform::from_translation(a.midpoint(b).extend(LABEL_Z)),
         ));
+        if selected.contains(&edge.id.as_str()) {
+            spawned.insert(Selected);
+        }
         if let Some(label) = &edge.label {
             spawned.insert((
                 Text2d::new(label.clone()),

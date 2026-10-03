@@ -72,6 +72,12 @@ bevy = { version = "0.19", default-features = false, features = ["webgl2"] }
 # read `/s/{id}` back out of the URL extd served the page under.
 web-sys = { version = "0.3", features = ["Window", "Location"] }
 
+# Test-only: the polygon shader is text until a GPU sees it, and a typo in it
+# is a blank board rather than a build error. `naga` is already in the tree
+# under wgpu; this parses and type-checks the same WGSL at `cargo test`.
+[dev-dependencies]
+naga = { version = "29", default-features = false, features = ["wgsl-in"] }
+
 # `bevy run --features dev`. dynamic_linking is the whole point (link time);
 # the rest is the inspector/hot-reload kit. Never enabled in release.
 [features]

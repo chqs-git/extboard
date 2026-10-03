@@ -11,6 +11,7 @@ fn node(id: &str, x: i64) -> Node {
         width: 100,
         height: 50,
         color: None,
+        sides: None,
         kind: NodeKind::Text {
             text: String::new(),
         },

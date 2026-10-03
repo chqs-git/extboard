@@ -21,6 +21,10 @@ pub struct Node {
     pub height: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    // A key rather than a node type: an unknown key still draws as the rect it
+    // was, where an unknown type is skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sides: Option<u8>,
     #[serde(flatten)]
     pub kind: NodeKind,
     #[serde(flatten)]
@@ -37,6 +41,8 @@ struct NodeRepr {
     height: i64,
     #[serde(default)]
     color: Option<String>,
+    #[serde(default)]
+    sides: Option<u8>,
     #[serde(flatten)]
     rest: Map<String, Value>,
 }
@@ -50,6 +56,7 @@ impl<'de> Deserialize<'de> for Node {
             width,
             height,
             color,
+            sides,
             mut rest,
         } = NodeRepr::deserialize(d)?;
 
@@ -68,6 +75,7 @@ impl<'de> Deserialize<'de> for Node {
             width,
             height,
             color,
+            sides: sides_of(sides),
             kind,
             extra: rest,
         })
@@ -92,6 +100,16 @@ pub enum NodeKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
     },
+}
+
+pub const MIN_SIDES: u8 = 3;
+pub const CIRCLE_SIDES: u8 = 10;
+
+pub fn sides_of(sides: Option<u8>) -> Option<u8> {
+    match sides? {
+        ..MIN_SIDES => None,
+        sides => Some(sides.min(CIRCLE_SIDES)),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

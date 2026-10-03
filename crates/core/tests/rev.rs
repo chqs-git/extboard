@@ -40,6 +40,7 @@ fn identical_documents_built_differently_have_equal_revs() {
                 width: 250,
                 height: 60,
                 color: Some("5".into()),
+                sides: None,
                 kind: NodeKind::Text {
                     text: "Blue box".into(),
                 },
@@ -52,6 +53,7 @@ fn identical_documents_built_differently_have_equal_revs() {
                 width: 250,
                 height: 60,
                 color: Some("1".into()),
+                sides: None,
                 kind: NodeKind::Text {
                     text: "Red box".into(),
                 },
@@ -137,6 +139,7 @@ fn a_taken_id_forces_the_counter_forward() {
         width: 10,
         height: 10,
         color: None,
+        sides: None,
         kind: NodeKind::Text {
             text: String::new(),
         },
