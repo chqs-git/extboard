@@ -688,6 +688,46 @@ mod tests {
         assert_eq!(error, "no node with id ghost-42");
     }
 
+    // The motivating use case (E8-T5): a stop is four cells of a markdown
+    // table, and the photos beside it project as paths next to their captions.
+    #[test]
+    fn the_trip_example_is_a_table_and_two_paths() {
+        let trip: Canvas =
+            serde_json::from_str(include_str!("../../../examples/trip.canvas")).unwrap();
+        let stops = "| stop | lat | lon | day |";
+        let whole = whole(&trip);
+
+        let files: Vec<&Node> = trip
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind, NodeKind::File { .. }))
+            .collect();
+        assert_eq!(files.len(), 2);
+        for node in &files {
+            let NodeKind::File { file, .. } = &node.kind else {
+                unreachable!()
+            };
+            assert!(whole.contains(&format!("file {} ", node.id)), "{whole}");
+            assert!(whole.contains(file), "the path did not travel: {whole}");
+        }
+        for caption in ["## Tram 28 at Graça", "## Pena, the yellow wing"] {
+            assert!(whole.contains(caption), "a caption went missing: {whole}");
+        }
+
+        // The lever the use case rests on: the stops alone, and a round trip
+        // that leaves the images untouched.
+        let id = trip
+            .nodes
+            .iter()
+            .find(|node| matches!(&node.kind, NodeKind::Text { text } if text.contains(stops)))
+            .map(|node| node.id.clone())
+            .expect("a stops table");
+        let projected = render(&trip, Some(&[id])).unwrap();
+        assert!(projected.contains(stops), "{projected}");
+        assert_eq!(projected.lines().count(), 2, "{projected}");
+        assert_eq!(unproject(&projected, &trip).unwrap().nodes, trip.nodes);
+    }
+
     // The point of the whole exercise: a board worth reading, cheaply. Real
     // boards land near 3x; node text is the rest of the payload and no
     // projection can shrink it.

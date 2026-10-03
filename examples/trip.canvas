@@ -1,0 +1,98 @@
+{
+  "nodes": [
+    {
+      "id": "756f5bac4e316153",
+      "x": 0,
+      "y": 0,
+      "width": 560,
+      "height": 320,
+      "type": "text",
+      "text": "## Stops\n\n| stop | lat | lon | day |\n| --- | --- | --- | --- |\n| Miradouro da Graça | 38.7158 | -9.1313 | 1 |\n| Mosteiro dos Jerónimos | 38.6971 | -9.2066 | 2 |\n| Palácio da Pena | 38.7876 | -9.3904 | 3 |"
+    },
+    {
+      "id": "a9ca557cf621dd7d",
+      "x": 620,
+      "y": 0,
+      "width": 320,
+      "height": 120,
+      "color": "4",
+      "type": "text",
+      "text": "## Day 1 — Alfama\n\nTram 28 up, walk down. Dinner at the Graça viewpoint."
+    },
+    {
+      "id": "c8e60396761cba3b",
+      "x": 620,
+      "y": 180,
+      "width": 320,
+      "height": 120,
+      "color": "4",
+      "type": "text",
+      "text": "## Day 2 — Belém\n\nMosteiro at opening, pastéis after, the river walk back."
+    },
+    {
+      "id": "7bcac3fd4c91e48c",
+      "x": 620,
+      "y": 360,
+      "width": 320,
+      "height": 120,
+      "color": "4",
+      "type": "text",
+      "text": "## Day 3 — Sintra\n\nEarly train from Rossio; Pena before the queue."
+    },
+    {
+      "id": "d010d36927ea424c",
+      "x": 0,
+      "y": 440,
+      "width": 320,
+      "height": 60,
+      "type": "text",
+      "text": "## Tram 28 at Graça"
+    },
+    {
+      "id": "13b8eecf730163a3",
+      "x": 0,
+      "y": 500,
+      "width": 320,
+      "height": 240,
+      "type": "file",
+      "file": "images/tram-28-graca.png"
+    },
+    {
+      "id": "34d60d0b23866c97",
+      "x": 360,
+      "y": 440,
+      "width": 320,
+      "height": 60,
+      "type": "text",
+      "text": "## Pena, the yellow wing"
+    },
+    {
+      "id": "2d1c84f37cca0d68",
+      "x": 360,
+      "y": 500,
+      "width": 320,
+      "height": 240,
+      "type": "file",
+      "file": "images/pena-yellow-wing.png"
+    }
+  ],
+  "edges": [
+    {
+      "id": "37831d9b77f72f4a",
+      "fromNode": "a9ca557cf621dd7d",
+      "fromSide": "bottom",
+      "toNode": "c8e60396761cba3b",
+      "toSide": "top"
+    },
+    {
+      "id": "4f1a0c2d5e8b9a60",
+      "fromNode": "c8e60396761cba3b",
+      "fromSide": "bottom",
+      "toNode": "7bcac3fd4c91e48c",
+      "toSide": "top"
+    }
+  ],
+  "theme": {
+    "name": "EverForest"
+  }
+}
