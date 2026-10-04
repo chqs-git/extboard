@@ -1,5 +1,9 @@
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
+use extboard_core::{Canvas, Node as CanvasNode};
+
+use crate::client::{Document, Rev, Space};
+use crate::node::to_world;
 
 const ZOOM_MIN: f32 = 0.05;
 const ZOOM_MAX: f32 = 20.0;
@@ -10,13 +14,65 @@ pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_camera)
-            .add_systems(Update, (pan, zoom));
+        app.init_resource::<Arriving>()
+            .add_systems(Startup, spawn_camera)
+            .add_systems(
+                Update,
+                (
+                    arm.run_if(resource_changed::<Space>),
+                    arrive.run_if(resource_exists_and_changed::<Document>),
+                    pan,
+                    zoom,
+                )
+                    .chain(),
+            );
     }
 }
 
 #[derive(Component)]
 struct ZoomTarget(f32);
+
+#[derive(Resource, Default)]
+struct Arriving(bool);
+
+fn arm(mut arriving: ResMut<Arriving>) {
+    arriving.0 = true;
+}
+
+// `switch` empties the document first, so a rev is what says the load landed.
+fn arrive(
+    mut arriving: ResMut<Arriving>,
+    rev: Res<Rev>,
+    document: Res<Document>,
+    camera: Single<&mut Transform, With<Camera2d>>,
+) {
+    if !arriving.0 || rev.0.is_empty() {
+        return;
+    }
+    arriving.0 = false;
+    let Some(middle) = center(&document.0) else {
+        return;
+    };
+    let mut transform = camera.into_inner();
+    transform.translation = middle.extend(transform.translation.z);
+}
+
+fn center(canvas: &Canvas) -> Option<Vec2> {
+    let box_ = |node: &CanvasNode| {
+        Rect::new(
+            node.x as f32,
+            node.y as f32,
+            (node.x + node.width) as f32,
+            (node.y + node.height) as f32,
+        )
+    };
+    let bounds = canvas
+        .nodes
+        .iter()
+        .map(box_)
+        .reduce(|all, one| all.union(one))?;
+    Some(to_world(bounds.center()))
+}
 
 fn spawn_camera(mut commands: Commands) {
     commands.spawn((Camera2d, ZoomTarget(1.0)));
@@ -140,6 +196,46 @@ mod tests {
             cursor_world(Vec2::ZERO, viewport, cam, 2.0),
             cam + Vec2::new(-800.0, 600.0)
         );
+    }
+
+    fn canvas(boxes: &[(i64, i64, i64, i64)]) -> Canvas {
+        Canvas {
+            nodes: boxes
+                .iter()
+                .enumerate()
+                .map(|(index, &(x, y, width, height))| CanvasNode {
+                    id: format!("n{index}"),
+                    x,
+                    y,
+                    width,
+                    height,
+                    color: None,
+                    sides: None,
+                    kind: extboard_core::NodeKind::Text {
+                        text: String::new(),
+                    },
+                    extra: serde_json::Map::new(),
+                })
+                .collect(),
+            ..Canvas::default()
+        }
+    }
+
+    #[test]
+    fn a_board_centres_on_everything_it_holds() {
+        assert_eq!(
+            center(&canvas(&[(0, 0, 200, 100)])),
+            Some(Vec2::new(100.0, -50.0))
+        );
+        assert_eq!(
+            center(&canvas(&[(0, 0, 100, 100), (900, 300, 100, 100)])),
+            Some(Vec2::new(500.0, -200.0))
+        );
+        assert_eq!(
+            center(&canvas(&[(-400, -200, 100, 100), (100, 0, 100, 100)])),
+            Some(Vec2::new(-100.0, 50.0))
+        );
+        assert_eq!(center(&canvas(&[])), None);
     }
 
     #[test]

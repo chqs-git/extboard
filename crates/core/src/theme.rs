@@ -14,6 +14,7 @@ pub const PRIMARY: usize = 1;
 pub const SECONDARY: usize = 2;
 pub const ACCENT: usize = 3;
 pub const TEXT: usize = 4;
+pub const ACCENT_B: usize = 5;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Theme {

@@ -1,5 +1,7 @@
 use bevy::prelude::*;
-use extboard_core::{Node as CanvasNode, NodeKind, is_image, sides_inset, style};
+use extboard_core::{
+    ACCENT, ACCENT_B, Node as CanvasNode, NodeKind, is_image, sides_inset, space_path, style,
+};
 use std::collections::HashMap;
 
 use crate::camera::world_to_screen;
@@ -7,7 +9,7 @@ use crate::client::{Document, asset_path};
 use crate::node::{NodeId, NodeRect};
 use crate::select::{OUTLINE, Selected};
 use crate::shape::{Palette, PolygonMaterial, paint};
-use crate::theme::Theme;
+use crate::theme::{Face, Theme};
 
 use super::edit_text::{Editing, editor, label_editor};
 use super::{GROUP_SIZE, PADDING, ROW_GAP, Raster, blocks, justify, markdown, spawn_blocks, wrap};
@@ -111,6 +113,7 @@ fn inside(
             parent.spawn(editor(md, &face, raster));
         }
         (_, Some(md)) => spawn_blocks(
+            &node.id,
             &blocks(md),
             theme,
             &face,
@@ -130,19 +133,28 @@ fn inside(
             ));
         }
         (NodeKind::Group { label: Some(label) }, _) => {
-            parent.spawn((
-                Text::new(label.clone()),
-                TextFont {
-                    font: face.source.clone(),
-                    font_smoothing: face.smoothing,
-                    ..TextFont::from_font_size(GROUP_SIZE * raster)
-                },
-                TextColor(face.ink),
-                wrap(bevy::text::Justify::Left),
-            ));
+            parent.spawn(heading(label, &face, face.ink, raster));
+        }
+        (NodeKind::Link { url }, _) => {
+            if let Some(space) = space_path(url) {
+                parent.spawn(heading(space, &face, theme.slot(ACCENT_B, ACCENT), raster));
+            }
         }
         _ => {}
     }
+}
+
+fn heading(text: &str, face: &Face, ink: Color, raster: f32) -> impl Bundle {
+    (
+        Text::new(text.to_owned()),
+        TextFont {
+            font: face.source.clone(),
+            font_smoothing: face.smoothing,
+            ..TextFont::from_font_size(GROUP_SIZE * raster)
+        },
+        TextColor(ink),
+        wrap(bevy::text::Justify::Left),
+    )
 }
 
 fn content_padding(sides: Option<u8>, size: Vec2, raster: f32) -> UiRect {

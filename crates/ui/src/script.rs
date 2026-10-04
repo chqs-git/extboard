@@ -714,8 +714,10 @@ fn click(
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     nodes: Query<(&NodeId, &Transform, &NodeRect)>,
+    links: crate::text::Links,
     mut script: ResMut<Script>,
     mut document: ResMut<Document>,
+    mut space: ResMut<crate::client::Space>,
     mut pressed: Local<Option<(String, Vec2)>>,
 ) {
     let at = window.cursor_position();
@@ -731,6 +733,15 @@ fn click(
         return;
     };
     if at.is_none_or(|at| at.distance(from) > SLOP_PX) {
+        return;
+    }
+    let door = at
+        .and_then(|at| links.under(&node, at))
+        .or_else(|| crate::spaces::linked(&document.0, &node));
+    if let Some(id) = door {
+        if space.id() != Some(id.as_str()) {
+            space.0 = Some(id);
+        }
         return;
     }
     // Checked before the write, so an unscripted click is not a document change.

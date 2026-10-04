@@ -188,12 +188,42 @@ fn a_link_and_a_code_span_are_the_themes_rather_than_fixed_colours() {
         italic: false,
         mono,
         link,
+        space: None,
     };
     let face = theme.face(None, None);
     let code = theme.code_face();
     let body = color(&span(false, false), &theme, &face, &code);
     let link = color(&span(false, true), &theme, &face, &code);
     let mono = color(&span(true, false), &theme, &face, &code);
+    let ink = |theme: &Theme| {
+        color(
+            &Span {
+                space: Some("trip".to_owned()),
+                ..span(false, true)
+            },
+            theme,
+            &theme.face(None, None),
+            &theme.code_face(),
+        )
+    };
+    let full = Theme::from_colors(&[
+        "#000000", "#111111", "#222222", "#333333", "#444444", "#555555", "#666666", "#777777",
+    ]);
+    let door = ink(&full);
+    assert_eq!(door, full.color(extboard_core::ACCENT_B));
+    assert_ne!(
+        door,
+        full.color(extboard_core::ACCENT),
+        "the next accent, not the plain one"
+    );
+    assert_ne!(
+        door,
+        color(&span(false, true), &full, &face, &code),
+        "a door has to read differently from a web link"
+    );
+
+    assert_eq!(ink(&theme), theme.color(extboard_core::ACCENT));
+    assert_ne!(ink(&theme), theme.color(extboard_core::BACKGROUND));
     assert_eq!(body, theme.color(TEXT));
     assert_eq!(link, theme.color(PRIMARY));
     assert_eq!(mono, theme.color(ACCENT));
@@ -242,4 +272,33 @@ fn a_raster_tier_never_undersamples_or_resizes_the_content() {
         let corner = content_top_left(size * tier, scale);
         assert!(corner.abs().max_element() < 1e-3, "zoom {zoom}: {corner}");
     }
+}
+
+#[test]
+fn a_markdown_link_to_a_space_carries_it_and_a_web_link_does_not() {
+    let got = blocks("see [trip](/s/trip) and [bevy](https://bevy.org)");
+    let spans = line(&got, 0);
+    let doors: Vec<_> = spans
+        .iter()
+        .map(|span| (span.text.as_str(), span.link, span.space.as_deref()))
+        .collect();
+    assert_eq!(
+        doors,
+        [
+            ("see ", false, None),
+            ("trip", true, Some("trip")),
+            (" and ", false, None),
+            ("bevy", true, None),
+        ]
+    );
+}
+
+#[test]
+fn a_door_is_indexed_by_its_span_position_in_the_line() {
+    let spans = blocks("see [trip](/s/trip) and [kitchen](/s/kitchen-sink)");
+    assert_eq!(
+        doors(line(&spans, 0)),
+        [(1, "trip".to_owned()), (3, "kitchen-sink".to_owned()),]
+    );
+    assert!(doors(line(&blocks("just prose"), 0)).is_empty());
 }

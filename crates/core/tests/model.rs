@@ -1,8 +1,4 @@
-//! The ticket's "done when": every fixture parses. The round trip is the half
-//! that actually proves the no-data-loss claim — parsing alone is happy to
-//! drop a key it never looked at.
-
-use extboard_core::{CIRCLE_SIDES, Canvas, MIN_SIDES, NodeKind, style};
+use extboard_core::{CIRCLE_SIDES, Canvas, MIN_SIDES, NodeKind, space_path, style};
 
 const FIXTURES: [(&str, &str); 4] = [
     ("simple", include_str!("fixtures/simple.canvas")),
@@ -134,4 +130,14 @@ fn a_style_survives_the_file() {
 
     let back: Canvas = serde_json::from_str(&canvas.to_pretty_string()).unwrap();
     assert_eq!(back, canvas);
+}
+
+#[test]
+fn a_space_path_is_the_first_segment_after_s() {
+    assert_eq!(space_path("/s/kitchen-sink"), Some("kitchen-sink"));
+    assert_eq!(space_path("/s/lisbon-trip/"), Some("lisbon-trip"));
+    assert_eq!(space_path("/"), None);
+    assert_eq!(space_path("/s/"), None);
+    assert_eq!(space_path("/v/kitchen-sink"), None);
+    assert_eq!(space_path("https://example.com/s/trip"), None);
 }

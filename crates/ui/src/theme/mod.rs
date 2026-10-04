@@ -262,6 +262,15 @@ impl Theme {
         self.live.color(index).and_then(hex).unwrap_or(DARK)
     }
 
+    // `color` wraps on the palette's length: slot 5 of five is the background.
+    pub fn slot(&self, index: usize, fallback: usize) -> Color {
+        self.color(if index < self.live.colors.len() {
+            index
+        } else {
+            fallback
+        })
+    }
+
     #[cfg(test)]
     pub fn from_colors(colors: &[&str]) -> Self {
         Self {

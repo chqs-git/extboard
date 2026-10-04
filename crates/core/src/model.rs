@@ -126,6 +126,11 @@ pub fn url_path(path: &str) -> String {
     out
 }
 
+pub fn space_path(path: &str) -> Option<&str> {
+    let id = path.strip_prefix("/s/")?.split('/').next()?;
+    (!id.is_empty()).then_some(id)
+}
+
 // The two bevy's font loader reads, and so the two a drop may add.
 pub fn is_font(file: &str) -> bool {
     let lower = file.to_ascii_lowercase();
