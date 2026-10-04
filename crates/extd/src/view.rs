@@ -1,20 +1,13 @@
-//! `GET /v/<space>` — server-rendered read-only HTML, no JS. Phase 3.
-//!
-//! The phone path: positions, markdown, images, native text selection. Folded
-//! into extd rather than living in its own crate — it is one handler with no
-//! second consumer.
-
 use extboard_core::{
     CIRCLE_SIDES, Canvas, End, Node, NodeKind, edge_ends, is_image, sides_inset, sides_polygon,
-    url_path,
+    space_path, url_path,
 };
-use pulldown_cmark::{Event, Options, Parser};
+use pulldown_cmark::{Event, Options, Parser, Tag};
 use std::fmt::Write;
 
 // Room for the arrowheads and the group labels that sit on the bounding box.
 const MARGIN: f32 = 40.0;
 
-/// The whole page for one space.
 pub fn page(space: &str, canvas: &Canvas) -> String {
     let (origin, size) = extent(canvas);
     let at = |x: f32, y: f32| (x - origin.0, y - origin.1);
@@ -99,7 +92,6 @@ overflow:hidden}\
 .edge-label{position:absolute;transform:translate(-50%,-50%);color:#e0e4ea;\
 font-size:13px;background:#12121ac0;padding:0 4px;border-radius:3px}";
 
-/// Top-left corner and size of everything on the board, plus a margin.
 fn extent(canvas: &Canvas) -> ((f32, f32), (f32, f32)) {
     let Some(first) = canvas.nodes.first() else {
         return ((0.0, 0.0), (320.0, 240.0));
@@ -121,8 +113,6 @@ fn extent(canvas: &Canvas) -> ((f32, f32), (f32, f32)) {
     )
 }
 
-/// The `<line>`/`<polygon>` markup, and the labels as HTML: `<foreignObject>`
-/// is a worse way to get text a phone will happily select.
 fn edges(canvas: &Canvas, at: impl Fn(f32, f32) -> (f32, f32)) -> (String, String) {
     let find = |id: &str| canvas.nodes.iter().find(|node| node.id == id);
     let mut svg = String::new();
@@ -223,14 +213,26 @@ fn contents(node: &Node) -> String {
     match &node.kind {
         NodeKind::Text { text } => markdown(text),
         NodeKind::File { file, .. } => file_node(file),
-        NodeKind::Link { url } => match safe_url(url) {
-            Some(href) => format!(r#"<a href="{}">{}</a>"#, esc(&href), esc(url)),
-            None => esc(url),
-        },
+        NodeKind::Link { url } => link_node(url),
         NodeKind::Group { label } => match label {
             Some(label) => format!(r#"<div class="label">{}</div>"#, esc(label)),
             None => String::new(),
         },
+    }
+}
+
+fn link_node(url: &str) -> String {
+    let text = space_path(url).unwrap_or(url);
+    match href(url) {
+        Some(href) => format!(r#"<a href="{}">{}</a>"#, esc(&href), esc(text)),
+        None => esc(text),
+    }
+}
+
+fn href(url: &str) -> Option<String> {
+    match space_path(url) {
+        Some(space) => Some(format!("/v/{}", url_path(space))),
+        None => safe_url(url),
     }
 }
 
@@ -243,12 +245,22 @@ fn file_node(file: &str) -> String {
     }
 }
 
-/// Markdown to HTML, with every raw-HTML event dropped. A canvas can arrive by
-/// `cp` from someone else, so its text is untrusted input, not our markup.
 fn markdown(text: &str) -> String {
     let parser = Parser::new_ext(text, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH).map(
         |event| match event {
             Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
+            // `push_html` writes the destination straight into the attribute.
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) => Event::Start(Tag::Link {
+                link_type,
+                dest_url: href(&dest_url).unwrap_or_else(|| "#".to_owned()).into(),
+                title,
+                id,
+            }),
             other => other,
         },
     );
@@ -257,8 +269,6 @@ fn markdown(text: &str) -> String {
     out
 }
 
-/// `javascript:` and friends never reach an `href`. Relative links stay: they
-/// resolve against `/v/`, which is this page.
 fn safe_url(url: &str) -> Option<String> {
     match url.split_once(':') {
         None => Some(url.to_owned()),
@@ -271,8 +281,6 @@ fn safe_url(url: &str) -> Option<String> {
     }
 }
 
-/// The trust boundary: everything that came out of a canvas file goes through
-/// here before it reaches the page.
 fn esc(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
@@ -338,6 +346,34 @@ mod tests {
         assert!(shape_style(&shaped(None)).is_empty());
         let square = shape_style(&shaped(Some(4)));
         assert!(!square.contains("50.0% 0.0%"), "{square}");
+    }
+
+    #[test]
+    fn a_space_link_stays_on_the_phone_path_and_reads_as_the_board() {
+        assert_eq!(
+            link_node("/s/lisbon trip"),
+            r#"<a href="/v/lisbon%20trip">lisbon trip</a>"#
+        );
+        assert_eq!(
+            link_node("https://example.com"),
+            r#"<a href="https://example.com">https://example.com</a>"#
+        );
+        assert_eq!(link_node("javascript:alert(1)"), "javascript:alert(1)");
+    }
+
+    #[test]
+    fn a_markdown_link_is_gated_the_same_way_a_link_node_is() {
+        assert!(markdown("[trip](/s/trip)").contains(r#"href="/v/trip""#));
+        assert!(markdown("[bevy](https://bevy.org)").contains(r#"href="https://bevy.org""#));
+        for evil in [
+            "[x](javascript:alert(1))",
+            "[x](JavaScript:alert(1))",
+            "[x](data:text/html,<script>alert(1)</script>)",
+        ] {
+            let html = markdown(evil);
+            assert!(html.contains(r##"href="#""##), "{evil} -> {html}");
+            assert!(!html.contains("alert"), "{evil} -> {html}");
+        }
     }
 
     // The one that matters: a board is untrusted input, and this file writes

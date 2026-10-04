@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use extboard_core::{Canvas, NodeKind, space_path};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::client::{Notice, Space, base_url, space_url};
@@ -66,6 +67,14 @@ impl Plugin for SpacesPlugin {
                 )
                     .chain(),
             );
+    }
+}
+
+pub fn linked(canvas: &Canvas, node: &str) -> Option<String> {
+    let node = canvas.nodes.iter().find(|candidate| candidate.id == node)?;
+    match &node.kind {
+        NodeKind::Link { url } => space_path(url).map(str::to_owned),
+        _ => None,
     }
 }
 
@@ -309,6 +318,27 @@ fn lock(inbox: &Inbox) -> std::sync::MutexGuard<'_, Vec<Reply>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn canvas(url: &str) -> Canvas {
+        serde_json::from_str(&format!(
+            r#"{{"nodes":[
+                 {{"id":"n1","x":0,"y":0,"width":10,"height":10,"type":"link","url":"{url}"}},
+                 {{"id":"n2","x":0,"y":0,"width":10,"height":10,"type":"text","text":"/s/x"}}
+               ],"edges":[]}}"#
+        ))
+        .expect("a canvas")
+    }
+
+    #[test]
+    fn only_a_link_node_pointing_at_a_space_is_a_door() {
+        assert_eq!(linked(&canvas("/s/trip"), "n1").as_deref(), Some("trip"));
+        assert_eq!(linked(&canvas("/s/trip/"), "n1").as_deref(), Some("trip"));
+        for url in ["https://example.com", "/s/", "/v/trip", "trip", ""] {
+            assert_eq!(linked(&canvas(url), "n1"), None, "{url}");
+        }
+        assert_eq!(linked(&canvas("/s/trip"), "n2"), None);
+        assert_eq!(linked(&canvas("/s/trip"), "gone"), None);
+    }
 
     // A new space cannot land on one that exists: the POST would 409, and the
     // name on the tile would be somebody else's board.

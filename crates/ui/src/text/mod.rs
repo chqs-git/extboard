@@ -3,7 +3,9 @@ use bevy::prelude::*;
 use bevy::text::{FontStyle, FontWeight, Justify};
 use bevy::transform::TransformSystems;
 use bevy::ui::UiSystems;
-use extboard_core::{BACKGROUND, Node as CanvasNode, NodeKind, PRIMARY, TEXT};
+use extboard_core::{
+    ACCENT, ACCENT_B, BACKGROUND, Node as CanvasNode, NodeKind, PRIMARY, TEXT, space_path,
+};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use bevy::camera::CameraUpdateSystems;
@@ -12,10 +14,13 @@ use crate::client::Document;
 use crate::theme::{Face, Theme};
 
 mod edit_text;
+mod link;
 mod panel;
 
 pub use edit_text::{Editing, Target, editing};
 use edit_text::{release_field, toggle, track_label};
+use link::Doors;
+pub use link::Links;
 use panel::{outline_panels, spawn_label_editor, spawn_panels, track_panels};
 
 const PADDING: f32 = 12.0;
@@ -158,6 +163,7 @@ pub(super) struct Span {
     italic: bool,
     mono: bool,
     link: bool,
+    space: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -173,6 +179,7 @@ struct Marks {
     italic: usize,
     mono: usize,
     link: usize,
+    space: Option<String>,
 }
 
 impl Marks {
@@ -184,6 +191,7 @@ impl Marks {
             italic: self.italic > 0,
             mono: self.mono > 0,
             link: self.link > 0,
+            space: self.space.clone(),
         }
     }
 }
@@ -215,8 +223,14 @@ pub(super) fn blocks(md: &str) -> Vec<Block> {
             Event::End(TagEnd::Strong) => marks.bold -= 1,
             Event::Start(Tag::Emphasis) => marks.italic += 1,
             Event::End(TagEnd::Emphasis) => marks.italic -= 1,
-            Event::Start(Tag::Link { .. }) => marks.link += 1,
-            Event::End(TagEnd::Link) => marks.link -= 1,
+            Event::Start(Tag::Link { ref dest_url, .. }) => {
+                marks.link += 1;
+                marks.space = space_path(dest_url).map(str::to_owned);
+            }
+            Event::End(TagEnd::Link) => {
+                marks.link -= 1;
+                marks.space = None;
+            }
 
             Event::Start(Tag::Item) => spans.push(marks.span("- ")),
             Event::End(TagEnd::Item) => flush(&mut out, &mut spans),
@@ -282,6 +296,7 @@ fn heading_size(level: HeadingLevel) -> f32 {
     reason = "two faces, and each is three fields"
 )]
 pub(super) fn spawn_blocks(
+    node: &str,
     blocks: &[Block],
     theme: &Theme,
     face: &Face,
@@ -296,17 +311,21 @@ pub(super) fn spawn_blocks(
                 let Some((first, rest)) = spans.split_first() else {
                     continue;
                 };
-                parent
-                    .spawn(text_bundle(first, theme, face, code_face, raster, justify))
-                    .with_children(|parent| {
-                        for span in rest {
-                            parent.spawn((
-                                TextSpan::new(span.text.clone()),
-                                font(span, face, code_face, raster),
-                                TextColor(color(span, theme, face, code_face)),
-                            ));
-                        }
-                    });
+                let mut line =
+                    parent.spawn(text_bundle(first, theme, face, code_face, raster, justify));
+                // The root text is span zero and each child the next.
+                if let Some(doors) = Doors::new(node, doors(spans)) {
+                    line.insert(doors);
+                }
+                line.with_children(|parent| {
+                    for span in rest {
+                        parent.spawn((
+                            TextSpan::new(span.text.clone()),
+                            font(span, face, code_face, raster),
+                            TextColor(color(span, theme, face, code_face)),
+                        ));
+                    }
+                });
             }
             Block::Code(code) => {
                 parent
@@ -373,6 +392,14 @@ pub(super) fn spawn_blocks(
     }
 }
 
+fn doors(spans: &[Span]) -> Vec<(usize, String)> {
+    spans
+        .iter()
+        .enumerate()
+        .filter_map(|(at, span)| Some((at, span.space.clone()?)))
+        .collect()
+}
+
 fn text_bundle(
     span: &Span,
     theme: &Theme,
@@ -427,8 +454,10 @@ pub(super) fn justify(extra: &serde_json::Map<String, serde_json::Value>) -> Jus
 
 // A link and a code span are the runs that are not body text, so they take the
 // two slots that are not the node's own. The body takes the node's stroke.
-fn color(span: &Span, theme: &Theme, face: &Face, code_face: &Face) -> Color {
-    if span.link {
+pub(super) fn color(span: &Span, theme: &Theme, face: &Face, code_face: &Face) -> Color {
+    if span.space.is_some() {
+        theme.slot(ACCENT_B, ACCENT)
+    } else if span.link {
         theme.color(PRIMARY)
     } else if span.mono {
         code_face.ink

@@ -90,11 +90,13 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [target.'cfg(target_family = "wasm")'.dependencies]
 bevy = { version = "0.19", default-features = false, features = ["webgl2"] }
 # All three are already in the tree under bevy. The features are what reads
-# `/s/{id}` back out of the URL extd served the page under, and what reads a
-# dropped file: winit hands a browser drop a name with no bytes behind it.
+# `/s/{id}` back out of the URL extd served the page under and writes it again
+# when the board changes, and what reads a dropped file: winit hands a browser
+# drop a name with no bytes behind it.
 web-sys = { version = "0.3", features = [
   "Window",
   "Location",
+  "History",
   "Document",
   "EventTarget",
   "MouseEvent",

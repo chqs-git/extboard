@@ -78,7 +78,7 @@ impl Space {
 #[cfg(target_arch = "wasm32")]
 fn page_space_id() -> Option<String> {
     let path = web_sys::window()?.location().pathname().ok()?;
-    Some(space_from_path(&path)?.to_owned())
+    Some(extboard_core::space_path(&path)?.to_owned())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -86,15 +86,16 @@ fn page_space_id() -> Option<String> {
     None
 }
 
-// Only the first segment: `/s/a/b` is not an id, and the store would refuse it
-// with a 400 that reads like a server bug.
-#[cfg_attr(
-    not(target_arch = "wasm32"),
-    allow(dead_code, reason = "no URL natively")
-)]
-fn space_from_path(path: &str) -> Option<&str> {
-    let id = path.strip_prefix("/s/")?.split('/').next()?;
-    (!id.is_empty()).then_some(id)
+#[cfg(target_arch = "wasm32")]
+fn track_url(space: Res<Space>) {
+    let Some(history) = web_sys::window().and_then(|window| window.history().ok()) else {
+        return;
+    };
+    let path = match space.id() {
+        Some(id) => format!("/s/{}", extboard_core::url_path(id)),
+        None => "/".to_owned(),
+    };
+    let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&path));
 }
 
 pub struct ClientPlugin;
@@ -155,6 +156,8 @@ impl Plugin for ClientPlugin {
                     show_notice.run_if(resource_changed::<Notice>),
                 ),
             );
+        #[cfg(target_arch = "wasm32")]
+        app.add_systems(Update, track_url.run_if(resource_changed::<Space>));
     }
 }
 
@@ -394,16 +397,6 @@ fn lock_string(buffer: &Mutex<String>) -> std::sync::MutexGuard<'_, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_space_is_the_first_segment_after_s() {
-        assert_eq!(space_from_path("/s/kitchen-sink"), Some("kitchen-sink"));
-        assert_eq!(space_from_path("/s/lisbon-trip/"), Some("lisbon-trip"));
-        // No id in the path: the app opens on the spaces list.
-        assert_eq!(space_from_path("/"), None);
-        assert_eq!(space_from_path("/s/"), None);
-        assert_eq!(space_from_path("/v/kitchen-sink"), None);
-    }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
