@@ -8,6 +8,7 @@ pub mod rev;
 pub mod style;
 pub mod theme;
 pub mod validate;
+pub mod vars;
 
 pub use error::{MutationError, ValidationError};
 pub use geometry::{edge_ends, side_anchor, side_facing, sides_inset, sides_polygon};
@@ -23,3 +24,4 @@ pub use theme::{
     PRIMARY, PRIMARY_TEXT, ROLES, SECONDARY, SECONDARY_TEXT, TEXT, Theme,
 };
 pub use validate::validate;
+pub use vars::{Vars, interpolate};

@@ -19,6 +19,10 @@ pub fn render(canvas: &Canvas, selection: Option<&[String]>) -> Result<String, S
         out.push_str(&format!("script {name} {SCRIPT_PLACEHOLDER}\n"));
     }
 
+    for (name, value) in canvas.vars() {
+        out.push_str(&format!("var {name} {value}\n"));
+    }
+
     let edges: Vec<&Edge> = canvas
         .edges
         .iter()
@@ -197,7 +201,7 @@ pub fn unproject(projected: &str, original: &Canvas) -> Result<Canvas, String> {
         let at = |e: String| format!("line {}: {e}", number + 1);
         match line.split_whitespace().next() {
             Some("grid") => scoped = grid(line).map_err(at)?,
-            Some("script") => {}
+            Some("script" | "var") => {}
             Some("edge") => canvas.edges.push(edge(line, original).map_err(at)?),
             Some(_) => canvas.nodes.push(node(line, original).map_err(at)?),
             None => {}
@@ -495,6 +499,25 @@ mod tests {
         let projected = whole(&canvas);
         assert!(projected.contains("script main <kept>"), "{projected}");
         assert!(!projected.contains("on_click"), "{projected}");
+    }
+
+    #[test]
+    fn the_vars_are_listed_in_the_header_and_survive_a_round_trip() {
+        let mut original = canvas();
+        original
+            .extra
+            .insert("vars".to_owned(), serde_json::json!({"City": "Porto"}));
+        original.nodes[0].kind = NodeKind::Text {
+            text: "{{City}}".to_owned(),
+        };
+
+        let projected = whole(&original);
+        assert!(projected.contains(r#"var City "Porto""#), "{projected}");
+        assert!(projected.contains("{{City}}"), "{projected}");
+        assert_eq!(
+            unproject(&projected, &original).unwrap().extra["vars"],
+            original.extra["vars"]
+        );
     }
 
     // Quantisation is lossy by design, so the invariant is "quantised equals

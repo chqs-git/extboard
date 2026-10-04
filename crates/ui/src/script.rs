@@ -57,6 +57,7 @@ enum Effect {
     // `None` clears it, back to the colour the node's kind gets.
     Color(String, Option<String>),
     Text(String, String),
+    Var(String, String),
 }
 
 // Host functions are closures owned by the engine and the document is a
@@ -422,6 +423,10 @@ impl Script {
                 Effect::Resize(id, width, height) => canvas.resize_node(&id, width, height),
                 Effect::Color(id, color) => canvas.set_color(&id, color.as_deref()),
                 Effect::Text(id, text) => canvas.set_text(&id, text),
+                Effect::Var(name, value) => {
+                    canvas.set_var(&name, &value);
+                    Ok(())
+                }
             };
             if let Err(e) = outcome {
                 failed = Some(fault(e));
@@ -559,6 +564,13 @@ fn engine(pending: &Arc<Mutex<Pending>>) -> Engine {
         lock(&cell)
             .effects
             .push(Effect::Text(node.to_owned(), text.to_owned()));
+    });
+
+    let cell = pending.clone();
+    engine.register_fn("set_var", move |name: &str, value: &str| {
+        lock(&cell)
+            .effects
+            .push(Effect::Var(name.to_owned(), value.to_owned()));
     });
 
     engine
@@ -1177,7 +1189,7 @@ fn list_body(
 
 // Everything a handler can reach, which is the whole of it: there is no tier
 // behind this list to hand someone else's script.
-const API: [(&str, &str); 9] = [
+const API: [(&str, &str); 10] = [
     (
         "on_click(id, || ...)",
         "run the body when that node is clicked",
@@ -1207,6 +1219,10 @@ const API: [(&str, &str); 9] = [
     (
         "set_text(id, markdown)",
         "the node's own text, if it is a text node",
+    ),
+    (
+        "set_var(name, value)",
+        "every {{name}} on the board, in one write",
     ),
 ];
 
@@ -1747,6 +1763,18 @@ mod tests {
         // A node nobody registered is not an error, it is nothing.
         script.fire("n1", &mut canvas);
         assert_eq!(error(&script, MAIN), None);
+    }
+
+    #[test]
+    fn a_handler_renames_a_var_for_the_whole_board() {
+        let (mut script, mut canvas) =
+            scripted(r#"on_click("n7", || set_var("Character-A", "Maria"));"#);
+        script.fire("n7", &mut canvas);
+        assert_eq!(error(&script, MAIN), None);
+        assert_eq!(
+            extboard_core::interpolate("{{Character-A}}", canvas.vars()),
+            "Maria"
+        );
     }
 
     // The other half of the done-when: an error message, not a frozen window.

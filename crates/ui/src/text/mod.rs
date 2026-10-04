@@ -4,7 +4,8 @@ use bevy::text::{FontStyle, FontWeight, Justify};
 use bevy::transform::TransformSystems;
 use bevy::ui::UiSystems;
 use extboard_core::{
-    ACCENT, ACCENT_B, BACKGROUND, Node as CanvasNode, NodeKind, PRIMARY, TEXT, space_path,
+    ACCENT, ACCENT_B, BACKGROUND, Node as CanvasNode, NodeKind, PRIMARY, TEXT, Vars, interpolate,
+    space_path,
 };
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
@@ -196,7 +197,7 @@ impl Marks {
     }
 }
 
-pub(super) fn blocks(md: &str) -> Vec<Block> {
+pub(super) fn blocks(md: &str, vars: &Vars) -> Vec<Block> {
     let mut out = Vec::new();
     let mut spans: Vec<Span> = Vec::new();
     let mut marks = Marks {
@@ -260,7 +261,10 @@ pub(super) fn blocks(md: &str) -> Vec<Block> {
                 });
             }
 
-            Event::Text(text) => spans.push(marks.span(text.into_string())),
+            // A fence's body arrives as `Text` too, so `{{x}}` in one is left
+            // alone by the same guard that picks the code font.
+            Event::Text(text) if marks.mono > 0 => spans.push(marks.span(text.into_string())),
+            Event::Text(text) => spans.push(marks.span(interpolate(&text, vars).into_owned())),
             Event::Code(text) => {
                 marks.mono += 1;
                 spans.push(marks.span(text.into_string()));

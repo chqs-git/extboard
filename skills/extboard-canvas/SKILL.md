@@ -82,6 +82,14 @@ type needs:
 | `link` | `url` |
 | `group` | `label`, optional |
 
+A top-level `vars` block is substituted into node text and into group and edge
+labels **as the app draws them**: `{"vars": {"City": "Porto"}}` makes `{{City}}`
+read as Porto on the board. The `/v/` phone path renders the placeholder raw.
+Write the `{{City}}` placeholder, never the value, or the rename the block
+exists for stops working. Dotted paths reach inside a value
+(`{{Monday.unit}}`), an undefined var stays on screen as itself, and a `{{` in
+a code fence is left alone, which is how you show the braces.
+
 `color` is optional on a node: `"1"` to `"6"` for the presets, or `"#rrggbb"`.
 Anything else draws as no colour at all, so a typo is a silent no-op.
 
@@ -122,8 +130,9 @@ third at `y + 100`, not at a round number.
 ## A board too big to read whole
 
 `extd project` prints a reduced view of the document: one line per node, a fixed
-20 unit grid, scripts replaced by a placeholder. It costs about a third of the
-raw JSON and reads in a terminal.
+20 unit grid, scripts replaced by a placeholder and the `vars` block listed as
+`var <name> <json>` lines. It costs about a third of the raw JSON and reads in a
+terminal.
 
 ```sh
 extd project trip.canvas                     # the whole board
