@@ -1,7 +1,11 @@
 use super::edit_text::written_back;
 use super::panel::centre_scale_offset;
 use super::*;
-use extboard_core::{ACCENT, Canvas, Edge};
+use extboard_core::{ACCENT, Canvas, Edge, Vars};
+
+fn blocks(md: &str) -> Vec<Block> {
+    super::blocks(md, &Vars::new())
+}
 
 // The scaled content's corner, relative to the clip box's. Non-zero clips.
 fn content_top_left(size: Vec2, zoom: f32) -> Vec2 {
@@ -166,6 +170,16 @@ fn a_table_becomes_a_grid_of_cells_in_row_order() {
 fn a_code_block_keeps_its_newlines_and_drops_the_trailing_one() {
     let got = blocks("```rust\nfn main() {\n    ok();\n}\n```\n");
     assert_eq!(got, [Block::Code("fn main() {\n    ok();\n}".to_owned())]);
+}
+
+#[test]
+fn a_var_is_substituted_in_body_text_but_not_inside_a_code_fence() {
+    let vars: Vars = serde_json::from_str(r#"{"City":"Porto"}"#).unwrap();
+    let got = super::blocks("in {{City}} and {{Nope}}\n\n```\n{{City}}\n```\n", &vars);
+    assert_eq!(line(&got, 0)[0].text, "in Porto and {{Nope}}");
+    assert_eq!(got[1], Block::Code("{{City}}".to_owned()));
+    let inline = super::blocks("`{{City}}`", &vars);
+    assert_eq!(line(&inline, 0)[0].text, "{{City}}");
 }
 
 #[test]

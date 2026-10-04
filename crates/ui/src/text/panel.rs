@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use extboard_core::{
-    ACCENT, ACCENT_B, Node as CanvasNode, NodeKind, is_image, sides_inset, space_path, style,
+    ACCENT, ACCENT_B, Node as CanvasNode, NodeKind, Vars, interpolate, is_image, sides_inset,
+    space_path, style,
 };
 use std::collections::HashMap;
 
@@ -87,18 +88,31 @@ pub(super) fn spawn_panels(
                         },
                     ))
                     .with_children(|parent| {
-                        inside(node, &editing, &theme, &assets, raster, parent)
+                        inside(
+                            node,
+                            &editing,
+                            &theme,
+                            &assets,
+                            raster,
+                            document.0.vars(),
+                            parent,
+                        )
                     });
             });
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
 fn inside(
     node: &CanvasNode,
     editing: &Editing,
     theme: &Theme,
     assets: &AssetServer,
     raster: f32,
+    vars: &Vars,
     parent: &mut ChildSpawnerCommands,
 ) {
     let open = editing.node() == Some(node.id.as_str());
@@ -114,7 +128,7 @@ fn inside(
         }
         (_, Some(md)) => spawn_blocks(
             &node.id,
-            &blocks(md),
+            &blocks(md, vars),
             theme,
             &face,
             &theme.code_face(),
@@ -133,7 +147,7 @@ fn inside(
             ));
         }
         (NodeKind::Group { label: Some(label) }, _) => {
-            parent.spawn(heading(label, &face, face.ink, raster));
+            parent.spawn(heading(&interpolate(label, vars), &face, face.ink, raster));
         }
         (NodeKind::Link { url }, _) => {
             if let Some(space) = space_path(url) {
