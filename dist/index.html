@@ -9,8 +9,8 @@
      `rustc --target wasm32-unknown-unknown --print cfg` reports. -->
 
 <script type="module">
-import init, * as bindings from '/extboard-ui-f9460dea2f5b343d.js';
-const wasm = await init({ module_or_path: '/extboard-ui-f9460dea2f5b343d_bg.wasm' });
+import init, * as bindings from '/extboard-ui-f460526b6fce21b9.js';
+const wasm = await init({ module_or_path: '/extboard-ui-f460526b6fce21b9_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -25,6 +25,6 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
      is still ours, or the inline baseline leaves a gap under it. */
   canvas { display: block; }
 </style>
-<link rel="modulepreload" href="/extboard-ui-f9460dea2f5b343d.js" crossorigin="anonymous" integrity="sha384-+uLMiuwsqzW0I3wqR9F8F77cnsdihB1D7yB2mL1D8gs8HfTdDi9CSvmrFkSvY8Tn"><link rel="preload" href="/extboard-ui-f9460dea2f5b343d_bg.wasm" crossorigin="anonymous" integrity="sha384-vmvEJuukK24XHY7wYx6KO6w0DQ/9C/fmAxyHALo7G2AL0OzrkYRgsuvDT22MxHJf" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/extboard-ui-f460526b6fce21b9.js" crossorigin="anonymous" integrity="sha384-/rs2zh/3qQt6sjxTrkxQd2G5wuIs4rBhNpLnD2y/16qZC48eqYSJ73P1+9ybG/ch"><link rel="preload" href="/extboard-ui-f460526b6fce21b9_bg.wasm" crossorigin="anonymous" integrity="sha384-YLfXiGvWYEBqPrR6t/s1Z/BcWkpDAgEXMsel5xhyRoWlDkqtU5w88xpFfebyjROU" as="fetch" type="application/wasm"></head>
 <body></body>
 </html>

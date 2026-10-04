@@ -3,7 +3,7 @@ use extboard_core::{Node as CanvasNode, NodeKind, is_image, sides_inset, style};
 use std::collections::HashMap;
 
 use crate::camera::world_to_screen;
-use crate::client::Document;
+use crate::client::{Document, asset_path};
 use crate::node::{NodeId, NodeRect};
 use crate::select::{OUTLINE, Selected};
 use crate::shape::{Palette, PolygonMaterial, paint};
@@ -108,12 +108,13 @@ fn inside(
     );
     match (&node.kind, markdown(node)) {
         (_, Some(md)) if open => {
-            parent.spawn(editor(md, face.ink, raster));
+            parent.spawn(editor(md, &face, raster));
         }
         (_, Some(md)) => spawn_blocks(
             &blocks(md),
             theme,
             &face,
+            &theme.code_face(),
             raster,
             justify(&node.extra),
             parent,
@@ -121,7 +122,7 @@ fn inside(
         // The file is a path in the spaces dir, which is the asset root.
         (NodeKind::File { file, .. }, _) if is_image(file) => {
             parent.spawn((
-                ImageNode::new(assets.load(file.clone())),
+                ImageNode::new(assets.load(asset_path(file))),
                 Node {
                     width: percent(100.0),
                     ..default()
@@ -160,13 +161,10 @@ pub(super) fn spawn_label_editor(
     editing: Res<Editing>,
 ) {
     if let Some(id) = editing.edge() {
-        let label = document
-            .0
-            .edges
-            .iter()
-            .find(|edge| edge.id == id)
-            .and_then(|edge| edge.label.as_deref());
-        commands.spawn(label_editor(label.unwrap_or_default(), &theme));
+        let edge = document.0.edges.iter().find(|edge| edge.id == id);
+        let face = theme.face(None, edge.and_then(|edge| style::text_color(&edge.extra)));
+        let label = edge.and_then(|edge| edge.label.as_deref());
+        commands.spawn(label_editor(label.unwrap_or_default(), &theme, &face));
     }
 }
 
@@ -242,6 +240,10 @@ pub(super) fn track_panels(
         let want = content_padding(sides, size, raster.0);
         if node.padding != want {
             node.padding = want;
+        }
+        let box_size = size * raster.0;
+        if (node.width, node.height) != (px(box_size.x), px(box_size.y)) {
+            (node.width, node.height) = (px(box_size.x), px(box_size.y));
         }
         // The box is already `raster` times too big, so it needs that much less
         // scale to reach the camera's zoom.

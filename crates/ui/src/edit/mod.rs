@@ -96,6 +96,9 @@ impl Plugin for EditPlugin {
                     keys::nudge,
                     keys::duplicate,
                     keys::group,
+                    keys::copy,
+                    keys::paste,
+                    keys::pasted_nodes,
                 )
                     .run_if(
                         resource_exists::<Document>
@@ -107,7 +110,8 @@ impl Plugin for EditPlugin {
             )
                 .chain(),
         );
-        app.init_resource::<drop::Uploads>()
+        app.init_resource::<keys::Pasting>()
+            .init_resource::<drop::Uploads>()
             .add_systems(Update, drop::landed.run_if(resource_exists::<Document>));
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(Update, drop::dropped);
@@ -303,7 +307,7 @@ pub(super) fn with_contents(
 ) -> Vec<Entity> {
     let groups: Vec<(Entity, Rect)> = moving
         .iter()
-        .filter(|entity| matches!(kinds.get(**entity), Ok(Kind(NodeKind::Group { .. }))))
+        .filter(|entity| kinds.get(**entity).is_ok_and(Kind::is_group))
         .filter_map(|entity| nodes.get(*entity).ok())
         .map(|(entity, transform, rect)| (entity, bounds(transform, rect)))
         .collect();

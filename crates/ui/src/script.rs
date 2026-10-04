@@ -2,7 +2,7 @@ use bevy::input_focus::{FocusCause, InputFocus};
 use bevy::prelude::*;
 use bevy::text::{EditableText, Justify, TextCursorStyle, TextEdit};
 use bevy::ui::widget::TextScroll;
-use extboard_core::{Canvas, object_mut, rev};
+use extboard_core::{Canvas, PRESET_SLOTS, object_mut, rev};
 use rhai::{AST, Engine, EvalAltResult, FnPtr};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -72,6 +72,7 @@ struct Pending {
     // the clock twice lets one client's frame straddle a boundary and compute
     // the next slot's value, and then two clients fight over the node forever.
     at: i64,
+    colors: Vec<String>,
 }
 
 // An `every()` registration. The interval cuts the wall clock into slots and
@@ -265,6 +266,7 @@ impl Script {
         let mut compiled = self.scripts.remove(name).unwrap_or_else(Compiled::empty);
         compiled.source = source.to_owned();
         self.at(now_secs());
+        self.palette(canvas);
         {
             let mut pending = lock(&self.pending);
             pending.handlers.clear();
@@ -317,6 +319,7 @@ impl Script {
     // script that caused them.
     fn fire(&mut self, node: &str, canvas: &mut Canvas) {
         self.at(now_secs());
+        self.palette(canvas);
         for name in self.scripts.keys().cloned().collect::<Vec<_>>() {
             let mut failed = None;
             {
@@ -355,6 +358,7 @@ impl Script {
     // Script by script, the same as `fire`: one script's timer failing is that
     // script's error, and its effects land as one document change.
     fn fire_due(&mut self, now: i64, canvas: &mut Canvas) {
+        self.palette(canvas);
         for name in self.scripts.keys().cloned().collect::<Vec<_>>() {
             let mut failed = None;
             {
@@ -392,6 +396,10 @@ impl Script {
     // What `now()` answers until the next run sets it.
     fn at(&self, when: i64) {
         lock(&self.pending).at = when;
+    }
+
+    fn palette(&self, canvas: &Canvas) {
+        lock(&self.pending).colors = canvas.theme().colors;
     }
 
     fn handles(&self, node: &str) -> bool {
@@ -508,6 +516,19 @@ fn engine(pending: &Arc<Mutex<Pending>>) -> Engine {
     });
 
     let cell = pending.clone();
+    engine.register_fn(
+        "theme_color",
+        move |slot: i64| -> Result<String, Box<EvalAltResult>> {
+            let colors = &lock(&cell).colors;
+            usize::try_from(slot)
+                .ok()
+                .and_then(|slot| colors.get(slot % colors.len().max(1)))
+                .cloned()
+                .ok_or_else(|| format!("theme_color: no colour in slot {slot}").into())
+        },
+    );
+
+    let cell = pending.clone();
     engine.register_fn("move_node", move |node: &str, x: i64, y: i64| {
         lock(&cell)
             .effects
@@ -525,7 +546,7 @@ fn engine(pending: &Arc<Mutex<Pending>>) -> Engine {
     // refused by the write rather than drawn as nothing, so a typo says so.
     let cell = pending.clone();
     engine.register_fn("set_color", move |node: &str, color: &str| {
-        let color = (!color.is_empty()).then(|| color.to_owned());
+        let color = (!color.is_empty()).then(|| slot_named(color));
         lock(&cell)
             .effects
             .push(Effect::Color(node.to_owned(), color));
@@ -541,6 +562,12 @@ fn engine(pending: &Arc<Mutex<Pending>>) -> Engine {
     });
 
     engine
+}
+
+fn slot_named(color: &str) -> String {
+    (1..=PRESET_SLOTS)
+        .find(|slot| extboard_core::Theme::role(*slot) == color)
+        .map_or_else(|| color.to_owned(), |slot| slot.to_string())
 }
 
 // Top-level keys of the `.canvas` survive Obsidian (E0-T2), so the scripts and
@@ -1139,7 +1166,7 @@ fn list_body(
 
 // Everything a handler can reach, which is the whole of it: there is no tier
 // behind this list to hand someone else's script.
-const API: [(&str, &str); 8] = [
+const API: [(&str, &str); 9] = [
     (
         "on_click(id, || ...)",
         "run the body when that node is clicked",
@@ -1160,7 +1187,11 @@ const API: [(&str, &str); 8] = [
     ("resize_node(id, w, h)", "both have to be above zero"),
     (
         "set_color(id, color)",
-        "\"1\"-\"6\", \"#rrggbb\", \"\" clears it",
+        "\"1\"-\"6\", \"primary\", \"#rrggbb\", \"\" clears it",
+    ),
+    (
+        "theme_color(slot)",
+        "the space's own palette, as \"#rrggbb\": 0 is the background",
     ),
     (
         "set_text(id, markdown)",
@@ -1604,6 +1635,68 @@ mod tests {
     }
 
     // A write core refuses is an error on the script, not a silent no-op: the
+    #[test]
+    fn a_handler_paints_by_role_name_and_the_document_holds_the_slot() {
+        for (role, slot) in [
+            ("primary", "1"),
+            ("secondary", "2"),
+            ("accent", "3"),
+            ("text", "4"),
+            ("accent-b", "5"),
+        ] {
+            let (mut script, mut canvas) =
+                scripted(&format!(r#"on_click("n7", || set_color("n7", "{role}"));"#));
+            script.fire("n7", &mut canvas);
+            assert_eq!(canvas.nodes[0].color.as_deref(), Some(slot), "{role}");
+            assert_eq!(script.scripts[MAIN].status(), None, "{role}");
+        }
+
+        for (color, kept) in [("6", Some("6")), ("#1a2b3c", Some("#1a2b3c"))] {
+            let (mut script, mut canvas) = scripted(&format!(
+                r#"on_click("n7", || set_color("n7", "{color}"));"#
+            ));
+            script.fire("n7", &mut canvas);
+            assert_eq!(canvas.nodes[0].color.as_deref(), kept, "{color}");
+        }
+        for junk in ["background", "banana", "primaryy"] {
+            let (mut script, mut canvas) =
+                scripted(&format!(r#"on_click("n7", || set_color("n7", "{junk}"));"#));
+            script.fire("n7", &mut canvas);
+            assert!(canvas.nodes[0].color.is_none(), "{junk}");
+            assert!(
+                script.scripts[MAIN].status().is_some(),
+                "{junk} said nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_handler_reads_the_spaces_palette_and_paints_from_it() {
+        let (mut script, mut canvas) =
+            scripted(r#"on_click("n7", || set_color("n7", theme_color(3)));"#);
+        script.fire("n7", &mut canvas);
+        let accent = canvas.theme().colors[3].clone();
+        assert!(accent.starts_with('#'), "{accent}");
+        assert_eq!(canvas.nodes[0].color.as_deref(), Some(accent.as_str()));
+        assert_eq!(script.scripts[MAIN].status(), None);
+
+        let (mut script, mut canvas) =
+            scripted(r#"on_click("n7", || set_color("n7", theme_color(11)));"#);
+        script.fire("n7", &mut canvas);
+        let colors = canvas.theme().colors;
+        assert_eq!(
+            canvas.nodes[0].color.as_deref(),
+            Some(colors[11 % colors.len()].as_str())
+        );
+
+        let (mut script, mut canvas) =
+            scripted(r#"on_click("n7", || set_color("n7", theme_color(-1)));"#);
+        script.fire("n7", &mut canvas);
+        assert!(canvas.nodes[0].color.is_none());
+        let (message, _) = script.scripts[MAIN].status().expect("an error");
+        assert!(message.contains("theme_color"), "{message}");
+    }
+
     // whole reason `set_color` validates rather than storing what it is given.
     #[test]
     fn a_refused_write_lands_on_the_script_that_asked_for_it() {

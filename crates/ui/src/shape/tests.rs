@@ -102,6 +102,31 @@ fn the_stroke_weight_is_part_of_a_nodes_look() {
     assert_eq!(paint(&mut palette, &mut materials, &theme, &heavy), thin);
 }
 
+// An edge has one colour, and nothing to fill with it.
+#[test]
+fn an_edge_follows_the_boards_text_until_it_names_a_colour() {
+    let theme =
+        crate::theme::Theme::from_colors(&["#000000", "#111111", "#222222", "#333333", "#444444"]);
+    let mut edge = extboard_core::Edge {
+        id: "e".to_owned(),
+        from_node: "a".to_owned(),
+        from_side: None,
+        from_end: None,
+        to_node: "b".to_owned(),
+        to_side: None,
+        to_end: None,
+        label: None,
+        color: None,
+        extra: default(),
+    };
+    assert_eq!(
+        crate::scene::edge_color(&theme, &edge),
+        theme.color(extboard_core::TEXT)
+    );
+    edge.color = Some("3".to_owned());
+    assert_eq!(crate::scene::edge_color(&theme, &edge), theme.color(3));
+}
+
 #[test]
 fn a_nodes_three_colours_paint_its_rim_its_text_and_its_body() {
     let theme =

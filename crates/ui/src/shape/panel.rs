@@ -216,7 +216,7 @@ pub(super) fn shown(
             let edge = canvas.edges.iter().find(|edge| edge.id == *id)?;
             (
                 &edge.extra,
-                painted(edge.color.as_deref(), SECONDARY),
+                painted(edge.color.as_deref(), TEXT),
                 None,
                 None,
             )

@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use crate::camera::{screen_to_world, world_to_screen};
 use crate::client::Document;
 use crate::edit::{MIN_SIZE, Reach, TIP_PX, anchor_under, created, rects, tip_under};
-use crate::node::NodeRect;
+use crate::node::{NodeKind, NodeRect};
 use crate::scene::{EdgeId, nearest};
 
 // A selected edge is painted with it in scene.rs, and a selected node's panel
@@ -129,6 +129,7 @@ fn press(
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(Entity, &Transform, &NodeRect)>,
+    kinds: Query<&NodeKind>,
     edges: Query<(Entity, &EdgeId)>,
     document: Option<Res<Document>>,
     selected: Query<Entity, With<Selected>>,
@@ -157,27 +158,28 @@ fn press(
     }
     let add = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
 
-    if let Some(entity) = pick(
+    let node = pick(
         nodes.iter().map(|(entity, transform, rect)| {
             (entity, bounds(transform, rect), transform.translation.z)
         }),
         world,
-    ) {
-        return picked(&mut commands, &selected, add, entity);
-    }
+    );
 
-    // An edge is a thin target, so it is tried where no node was hit. A press on
-    // one is not a drag, and never starts a band.
-    if let Some(entity) = document
-        .as_deref()
-        .and_then(|document| nearest(&document.0, world, EDGE_PX * ortho.scale))
-        .and_then(|id| {
-            edges
-                .iter()
-                .find(|(_, edge)| edge.0 == id)
-                .map(|(entity, _)| entity)
+    let edge = tries_the_edge(node.and_then(|entity| kinds.get(entity).ok()))
+        .then(|| {
+            document
+                .as_deref()
+                .and_then(|document| nearest(&document.0, world, EDGE_PX * ortho.scale))
+                .and_then(|id| {
+                    edges
+                        .iter()
+                        .find(|(_, edge)| edge.0 == id)
+                        .map(|(entity, _)| entity)
+                })
         })
-    {
+        .flatten();
+
+    if let Some(entity) = edge.or(node) {
         return picked(&mut commands, &selected, add, entity);
     }
 
@@ -287,6 +289,10 @@ fn release(
     commands.remove_resource::<Band>();
 }
 
+fn tries_the_edge(hit: Option<&NodeKind>) -> bool {
+    hit.is_none_or(NodeKind::is_group)
+}
+
 // A band this small is a slipped click, not a node someone drew.
 fn big_enough(rect: Rect) -> bool {
     rect.size().min_element() >= MIN_SIZE
@@ -376,6 +382,23 @@ mod tests {
         app.set_error_handler(bevy::ecs::error::ignore)
             .add_systems(Update, drag_band);
         app.world_mut().run_schedule(Update);
+    }
+
+    #[test]
+    fn an_edge_is_reachable_over_a_group_and_never_over_a_card() {
+        let kind = NodeKind;
+        assert!(
+            tries_the_edge(None),
+            "empty canvas: the edge is all there is"
+        );
+        assert!(tries_the_edge(Some(&kind(
+            extboard_core::NodeKind::Group { label: None }
+        ))));
+        assert!(!tries_the_edge(Some(&kind(
+            extboard_core::NodeKind::Text {
+                text: String::new()
+            }
+        ))));
     }
 
     #[test]

@@ -27,9 +27,10 @@ pub struct Theme {
 // name one of their own.
 pub const FONT_ROLES: [&str; 3] = ["primary", "secondary", "tertiary"];
 pub const PRIMARY_TEXT: usize = 0;
+pub const SECONDARY_TEXT: usize = 1;
 // The embedded font: every space has it, no space stores it, and it is what
 // the primary text is until something else is chosen.
-pub const DEFAULT_FONT: &str = "FiraMono";
+pub const DEFAULT_FONT: &str = "JetBrains Mono";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fonts {
@@ -42,8 +43,6 @@ pub struct Fonts {
 
 impl Fonts {
     // What a text draws in: the embedded font for the primary one, nothing for
-    // the other two. A name the library does not have reads as unset, which is
-    // what keeps a hand-edited file from pointing at a font that is not there.
     pub fn font(&self, role: usize) -> Option<&str> {
         match self.text.get(role).map(String::as_str) {
             // The one name that needs no library behind it.

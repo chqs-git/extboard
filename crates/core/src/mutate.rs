@@ -114,9 +114,12 @@ impl Canvas {
 // The spec's colour field: one of Obsidian's six presets, or `#rrggbb`. Anything
 // else draws as no colour at all, so writing one is a silent no-op rather than
 // an edit \u{2014} which is the one thing a script must never look like.
+pub const PRESET_SLOTS: usize = 6;
+
 pub fn is_canvas_color(color: &str) -> bool {
     match color.strip_prefix('#') {
         Some(hex) => hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()),
-        None => matches!(color, "1" | "2" | "3" | "4" | "5" | "6"),
+        // Not `parse`: "01" and "+1" are numbers and are not spec colours.
+        None => (1..=PRESET_SLOTS).any(|slot| slot.to_string() == color),
     }
 }

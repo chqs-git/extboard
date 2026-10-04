@@ -31,6 +31,9 @@ axum       = { version = "0.8", default-features = false, features = ["http1", "
 tower      = { version = "0.5", default-features = false, features = ["util"] }
 # The wasm bundle: `fs` serves it, `compression-br` squeezes it on the way out.
 tower-http = { version = "0.6", default-features = false, features = ["fs", "compression-br"] }
+# `pull`/`push`'s client. Blocking suits a subcommand, and `rustls` carries ring
+# plus webpki roots, which is all Tailscale's Let's Encrypt certs ask for.
+ureq       = { version = "3", default-features = false, features = ["rustls"] }
 
 # Native release: fast, small-ish, reproducible.
 [profile.release]
