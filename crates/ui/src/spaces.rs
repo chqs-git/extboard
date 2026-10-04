@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::client::{BASE_URL, Notice, Space, space_url};
+use crate::client::{Notice, Space, base_url, space_url};
 use crate::select::PanelRoot;
 use crate::theme::DARK;
 
@@ -71,7 +71,7 @@ impl Plugin for SpacesPlugin {
 
 fn refresh(pending: Res<Pending>) {
     let inbox = pending.0.clone();
-    let request = ehttp::Request::get(format!("{BASE_URL}/api/spaces"));
+    let request = ehttp::Request::get(format!("{}/api/spaces", base_url()));
     ehttp::fetch(request, move |result| {
         lock(&inbox).push(listed(result));
     });
@@ -79,7 +79,7 @@ fn refresh(pending: Res<Pending>) {
 
 fn listed(result: ehttp::Result<ehttp::Response>) -> Reply {
     match result {
-        Err(e) => Reply::Failed(format!("extd unreachable at {BASE_URL}: {e}")),
+        Err(e) => Reply::Failed(format!("extd unreachable at {}: {e}", base_url())),
         Ok(response) if !response.ok => Reply::Failed(format!("extd returned {}", response.status)),
         Ok(response) => match serde_json::from_slice(&response.bytes) {
             Ok(ids) => Reply::Listed(ids),
@@ -98,7 +98,7 @@ fn create(pending: &Pending, id: String) {
 
 fn created(id: String, result: ehttp::Result<ehttp::Response>) -> Reply {
     match result {
-        Err(e) => Reply::Failed(format!("extd unreachable at {BASE_URL}: {e}")),
+        Err(e) => Reply::Failed(format!("extd unreachable at {}: {e}", base_url())),
         Ok(response) if response.status == 201 => Reply::Created(id),
         Ok(response) if response.status == 409 => Reply::Failed(format!("{id} already exists")),
         Ok(response) => Reply::Failed(format!("extd refused a new space: {}", response.status)),

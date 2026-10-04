@@ -8,11 +8,11 @@ use bevy::shader::ShaderRef;
 use bevy::text::{EditableText, Font, FontCx, FontSmoothing, TextCursorStyle, TextEdit};
 use bevy::ui_widgets::{ControlOrientation, ScrollArea, Scrollbar, ScrollbarThumb};
 use extboard_core::{
-    DEFAULT_FONT, FONT_ROLES, Fonts, MAX_COLORS, MIN_COLORS, PRESETS, PRIMARY_TEXT, TEXT,
-    Theme as Block, is_font,
+    ACCENT, DEFAULT_FONT, FONT_ROLES, Fonts, MAX_COLORS, MIN_COLORS, PRESETS, PRIMARY_TEXT,
+    SECONDARY_TEXT, TEXT, Theme as Block, is_font,
 };
 
-use crate::client::Document;
+use crate::client::{Document, asset_path};
 use crate::edit::command;
 use crate::script::Sidebar;
 use crate::select::PanelRoot;
@@ -224,6 +224,7 @@ impl Plugin for ThemePlugin {
         // The dials are a shader, and loading one needs a renderer to load it
         // into. Headless -- a test -- gets the panel's logic and no picture.
         app.init_asset::<DialMaterial>();
+        embedded_asset!(app, "JetBrainsMono-Regular.ttf");
         if app.get_sub_app(RenderApp).is_some() {
             embedded_asset!(app, "picker.wgsl");
             app.add_plugins(UiMaterialPlugin::<DialMaterial>::default());
@@ -246,7 +247,7 @@ impl Plugin for ThemePlugin {
                     // document that asked for it. `FontCx` is `TextPlugin`'s,
                     // so a headless panel has no fonts to name.
                     name_fonts.run_if(resource_exists::<FontCx>),
-                    (toggle, shortcuts, sync, prompt, typed)
+                    (toggle, shortcuts, sync, settle, prompt, typed)
                         .chain()
                         .run_if(resource_exists::<Document>),
                 )
@@ -303,6 +304,15 @@ impl Theme {
             source: name.map(|name| self.source(name)).unwrap_or_default(),
             smoothing: self.smoothing_of(name),
             ink: self.paint(color, TEXT),
+        }
+    }
+
+    pub fn code_face(&self) -> Face {
+        let name = self.fonts.font(SECONDARY_TEXT).unwrap_or(DEFAULT_FONT);
+        Face {
+            source: self.source(name),
+            smoothing: self.smoothing_of(Some(name)),
+            ink: self.color(ACCENT),
         }
     }
 
@@ -400,12 +410,24 @@ fn resolve(document: Res<Document>, assets: Res<AssetServer>, mut theme: ResMut<
     }
     let fonts = document.0.fonts();
     if theme.fonts != fonts {
-        theme.loaded = fonts
-            .library
-            .iter()
-            .map(|name| load(name, &assets))
+        theme.loaded = std::iter::once(embedded_default(&assets))
+            .chain(fonts.library.iter().map(|name| load(name, &assets)))
             .collect();
         theme.fonts = fonts;
+    }
+}
+
+fn embedded_default(assets: &AssetServer) -> Loaded {
+    Loaded {
+        name: DEFAULT_FONT.to_owned(),
+        bytes: None,
+        file: Some(
+            assets.load(
+                AssetPath::from_path_buf(embedded_path!("JetBrainsMono-Regular.ttf"))
+                    .with_source("embedded"),
+            ),
+        ),
+        source: FontSource::default(),
     }
 }
 
@@ -416,7 +438,7 @@ fn load(name: &str, assets: &AssetServer) -> Loaded {
         file if is_font(file) => Loaded {
             name: name.to_owned(),
             bytes: None,
-            file: Some(assets.load(file.to_owned())),
+            file: Some(assets.load(asset_path(file))),
             // The embedded font until it lands: a handle for an asset that has
             // not arrived draws nothing at all.
             source: FontSource::default(),
@@ -1378,7 +1400,13 @@ fn dialled(
         // from, so it is written here instead -- and sync.rs and undo.rs poll
         // `rev`, so the edit still saves and still undoes.
         document.bypass_change_detection().0.set_theme(&block);
-        theme.live = block;
+        theme.bypass_change_detection().live = block;
+    }
+}
+
+fn settle(buttons: Res<ButtonInput<MouseButton>>, picking: Res<Picking>, mut theme: ResMut<Theme>) {
+    if picking.0.is_some() && buttons.just_released(MouseButton::Left) {
+        theme.set_changed();
     }
 }
 

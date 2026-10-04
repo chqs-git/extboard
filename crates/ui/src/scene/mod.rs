@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy::text::TextLayoutInfo;
-use extboard_core::{End, SECONDARY, STROKES, stroke_width, style};
+use extboard_core::{End, STROKES, TEXT, stroke_width, style};
 use std::collections::HashMap;
 
 use crate::client::Document;
@@ -84,7 +84,7 @@ fn draw_edges(
         let color = if selected.iter().any(|picked| picked.0 == edge.id) {
             OUTLINE
         } else {
-            theme.paint(edge.color.as_deref(), SECONDARY)
+            edge_color(&theme, edge)
         };
         let heads = (
             edge.from_end.unwrap_or(End::None) == End::Arrow,
@@ -100,6 +100,12 @@ fn draw_edges(
             _ => draw_arrow(&mut mid, a, b, heads, hole, color),
         }
     }
+}
+
+// The spec's colour is the edge's line, and an edge that names none follows the
+// board's text: a line is read, not filled.
+pub fn edge_color(theme: &Theme, edge: &extboard_core::Edge) -> Color {
+    theme.paint(edge.color.as_deref(), TEXT)
 }
 
 fn spawn_edges(

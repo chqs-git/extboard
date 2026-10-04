@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use bevy::text::{FontStyle, FontWeight, Justify};
 use bevy::transform::TransformSystems;
 use bevy::ui::UiSystems;
-use extboard_core::{ACCENT, BACKGROUND, Node as CanvasNode, NodeKind, PRIMARY, TEXT};
+use extboard_core::{BACKGROUND, Node as CanvasNode, NodeKind, PRIMARY, TEXT};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use bevy::camera::CameraUpdateSystems;
@@ -53,13 +53,31 @@ fn raster_tier(zoom: f32) -> f32 {
     (zoom / RASTER_SLACK).ceil().clamp(1.0, RASTER_MAX)
 }
 
+// An editor is clipped to its own content box, which bevy measures before the
+// panel's scale reaches it: a tier's slack then shaves the left and top off the
+// glyphs, so a session is laid out at the zoom it opens on and scaled by one.
+fn editing_raster(zoom: f32) -> f32 {
+    zoom.max(1.0)
+}
+
 // Frozen while editing: a tier change respawns the panel, and a respawn would
 // reload the editor from the document and drop what has been typed into it.
-fn track_raster(camera: Single<&Projection, With<Camera2d>>, mut raster: ResMut<Raster>) {
+fn track_raster(
+    camera: Single<&Projection, With<Camera2d>>,
+    editing: Res<Editing>,
+    mut raster: ResMut<Raster>,
+) {
     let Projection::Orthographic(ortho) = *camera else {
         return;
     };
-    raster.set_if_neq(Raster(raster_tier(1.0 / ortho.scale)));
+    let zoom = 1.0 / ortho.scale;
+    if editing.0.is_some() {
+        if editing.is_changed() {
+            raster.set_if_neq(Raster(editing_raster(zoom)));
+        }
+        return;
+    }
+    raster.set_if_neq(Raster(raster_tier(zoom)));
 }
 
 // Anything consuming a click before the editors see it orders itself before this.
@@ -85,7 +103,7 @@ impl Plugin for TextPlugin {
             .add_systems(
                 Update,
                 (
-                    track_raster.run_if(not(editing)),
+                    track_raster,
                     // `and_then` is lazy, so the changed checks never run before
                     // the document lands: entering edit mode has to rebuild a
                     // panel too.
@@ -259,10 +277,15 @@ fn heading_size(level: HeadingLevel) -> f32 {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "two faces, and each is three fields"
+)]
 pub(super) fn spawn_blocks(
     blocks: &[Block],
     theme: &Theme,
     face: &Face,
+    code_face: &Face,
     raster: f32,
     justify: Justify,
     parent: &mut ChildSpawnerCommands,
@@ -274,13 +297,13 @@ pub(super) fn spawn_blocks(
                     continue;
                 };
                 parent
-                    .spawn(text_bundle(first, theme, face, raster, justify))
+                    .spawn(text_bundle(first, theme, face, code_face, raster, justify))
                     .with_children(|parent| {
                         for span in rest {
                             parent.spawn((
                                 TextSpan::new(span.text.clone()),
-                                font(span, face, raster),
-                                TextColor(color(span, theme, face)),
+                                font(span, face, code_face, raster),
+                                TextColor(color(span, theme, face, code_face)),
                             ));
                         }
                     });
@@ -298,10 +321,11 @@ pub(super) fn spawn_blocks(
                     .with_child((
                         Text::new(code.clone()),
                         TextFont {
-                            font_smoothing: theme.smoothing(),
+                            font: code_face.source.clone(),
+                            font_smoothing: code_face.smoothing,
                             ..TextFont::from_font_size(CODE)
                         },
-                        TextColor(theme.color(ACCENT)),
+                        TextColor(code_face.ink),
                         wrap(Justify::Left),
                     ));
             }
@@ -336,6 +360,7 @@ pub(super) fn spawn_blocks(
                                             ..default()
                                         },
                                         face,
+                                        code_face,
                                         raster,
                                     ),
                                     TextColor(theme.color(TEXT)),
@@ -352,13 +377,14 @@ fn text_bundle(
     span: &Span,
     theme: &Theme,
     face: &Face,
+    code_face: &Face,
     raster: f32,
     justify: Justify,
 ) -> (Text, TextFont, TextColor, TextLayout) {
     (
         Text::new(span.text.clone()),
-        font(span, face, raster),
-        TextColor(color(span, theme, face)),
+        font(span, face, code_face, raster),
+        TextColor(color(span, theme, face, code_face)),
         wrap(justify),
     )
 }
@@ -371,15 +397,10 @@ pub(super) fn wrap(justify: Justify) -> TextLayout {
     }
 }
 
-fn font(span: &Span, face: &Face, raster: f32) -> TextFont {
+fn font(span: &Span, face: &Face, code_face: &Face, raster: f32) -> TextFont {
+    let drawn = if span.mono { code_face } else { face };
     TextFont {
-        // A code span stays in the embedded font, which is FiraMono: `mono` is
-        // carried by family only when the text is not already mono.
-        font: if span.mono {
-            default()
-        } else {
-            face.source.clone()
-        },
+        font: drawn.source.clone(),
         weight: if span.bold {
             FontWeight::BOLD
         } else {
@@ -390,7 +411,7 @@ fn font(span: &Span, face: &Face, raster: f32) -> TextFont {
         } else {
             FontStyle::Normal
         },
-        font_smoothing: face.smoothing,
+        font_smoothing: drawn.smoothing,
         ..TextFont::from_font_size(span.size * raster)
     }
 }
@@ -406,11 +427,11 @@ pub(super) fn justify(extra: &serde_json::Map<String, serde_json::Value>) -> Jus
 
 // A link and a code span are the runs that are not body text, so they take the
 // two slots that are not the node's own. The body takes the node's stroke.
-fn color(span: &Span, theme: &Theme, face: &Face) -> Color {
+fn color(span: &Span, theme: &Theme, face: &Face, code_face: &Face) -> Color {
     if span.link {
         theme.color(PRIMARY)
     } else if span.mono {
-        theme.color(ACCENT)
+        code_face.ink
     } else {
         face.ink
     }

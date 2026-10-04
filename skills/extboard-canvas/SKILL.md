@@ -1,20 +1,65 @@
 ---
 name: extboard-canvas
-description: Edit an extboard space, a JSONCanvas `.canvas` file, from the console. Use when asked to add, move, connect, recolour or delete cards, nodes, arrows or edges on a board or canvas, or when a `.canvas` file is named or attached. Carries the format rules, the id convention, `extd project --selection` for a board too big to read whole, and `extd fmt` as the closing gate.
+description: Edit an extboard space, a JSONCanvas `.canvas` file, from the console. Use when asked to add, move, connect, recolour or delete cards, nodes, arrows or edges on a board or canvas, or when a `.canvas` file is named or attached. Settle dev or prod first: a local space is edited in place, a remote one goes through `extd pull`/`push`. Carries the format rules, the id convention, `extd project --selection` for a board too big to read whole, and `extd fmt` as the closing gate.
 ---
 
 # extboard canvas
 
-A space is one `.canvas` file in `~/extboard` (`EXTBOARD_DIR` overrides). Edit
-it with ordinary file tools. The server watches the directory and broadcasts the
-write, so every open client reloads on its own: there is no API call to make and
-no pipe to run.
+A space is one `.canvas` file. Which machine holds it is the first thing to
+settle, because getting it wrong fails quietly: the file changes and the board
+on screen does not.
+
+Every snippet below writes `extd`, which is not on `PATH`: run it as `cargo run
+-q -p extd -- <command>` from the repo root, or `cargo install --path
+crates/extd` once and have the real binary.
+
+## Dev or prod
+
+**Dev** is a local `extd serve` with its spaces in `~/extboard` (`EXTBOARD_DIR`
+overrides). Edit the file with ordinary file tools. The server watches the
+directory and broadcasts the write, so every open client reloads on its own:
+there is no API call to make and no pipe to run.
+
+**Prod** is a remote `extd`. Its spaces live on that host, so a local edit
+reaches nothing — `~/extboard` is a separate copy that drifts from it.
+
+`EXTBOARD_SERVER` is the tell: when it is set it names the server the client
+talks to, and the change belongs there. The `extboard-prod` alias sets it, and
+so does any mention of prod, the VPS or the server. Only the UI's *images* come
+off the local disk on a remote board, never the document. When it is genuinely
+unclear which board is meant, ask: the two copies never converge on their own.
+
+### Dev
 
 ```sh
 cd ~/extboard
 # read trip.canvas, edit it, then:
 extd fmt trip.canvas
 ```
+
+### Prod
+
+`pull`, edit, `fmt`, `push`, carrying the rev `pull` printed as `--base`:
+
+```sh
+export EXTBOARD_SERVER=https://host    # whatever extboard-prod points at
+extd pull /tmp/trip.canvas             # prints: pulled trip @ <rev>
+# edit /tmp/trip.canvas
+extd fmt /tmp/trip.canvas
+extd push /tmp/trip.canvas --base <rev>
+```
+
+The space id defaults to the file stem, so `untitled.canvas` is the `untitled`
+space; `--space` is only for a scratch file named something else.
+
+`--base` is a compare-and-swap and it is required. A `409` means the board moved
+while you were editing: re-pull and redo the edit on the new bytes. Never answer
+a `409` by pushing again with a freshly read rev, which is the clobber `--base`
+exists to prevent — there is no `--force`.
+
+`pull` writes canonical bytes, so `fmt` straight after one is a no-op and any
+diff afterwards is the edit rather than the formatting. `push` validates
+locally before it opens a socket, and extd validates again on arrival.
 
 `extd fmt` is the last step of every edit, never optional. It validates, then
 rewrites the file in the canonical form. A dangling edge or a duplicate id fails
@@ -114,3 +159,7 @@ where the exact pixel matters, edit the `.canvas` directly instead.
 - Placing a node "above" with a larger `y`.
 - A `color` of `"red"` or `"#f00"`. Neither is a canvas colour.
 - Reporting done without running `extd fmt`.
+- Editing `~/extboard` for a change that belongs on prod. Nothing errors; the
+  board just never changes.
+- Re-reading the rev to get past a `409` instead of pulling and redoing the
+  edit. It overwrites whatever moved.

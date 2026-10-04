@@ -16,6 +16,7 @@ axum.workspace = true
 tokio-stream.workspace = true
 notify.workspace = true
 tower-http.workspace = true
+ureq.workspace = true
 # `html` is not in the default set; the ui crate takes the same version with
 # `simd`, and cargo unifies them into one build.
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }

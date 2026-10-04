@@ -30,6 +30,12 @@ impl NodeRect {
 #[derive(Component)]
 pub struct NodeKind(pub extboard_core::NodeKind);
 
+impl NodeKind {
+    pub fn is_group(&self) -> bool {
+        matches!(self.0, extboard_core::NodeKind::Group { .. })
+    }
+}
+
 impl Plugin for NodePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(

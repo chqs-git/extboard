@@ -1,7 +1,7 @@
 use bevy::input_focus::{AutoFocus, InputFocus};
 use bevy::prelude::*;
-use bevy::text::{EditableText, TextCursorStyle, TextEdit};
-use extboard_core::{BACKGROUND, Canvas, NodeKind, TEXT};
+use bevy::text::{EditableText, TextCursorStyle};
+use extboard_core::{BACKGROUND, Canvas, NodeKind};
 
 use crate::camera::world_to_screen;
 use crate::client::Document;
@@ -9,7 +9,7 @@ use crate::edit::double_click;
 use crate::node::{NodeId, NodeRect};
 use crate::scene::{EdgeId, nearest};
 use crate::select::{EDGE_PX, bounds, cursor_world, pick};
-use crate::theme::Theme;
+use crate::theme::{Face, Theme};
 
 use super::{BODY, WELL, markdown};
 
@@ -57,9 +57,7 @@ impl Editing {
     }
 }
 
-// One line on a solid ground, over the label it is replacing.
-pub(super) fn label_editor(label: &str, theme: &Theme) -> impl Bundle {
-    let fg = theme.color(TEXT);
+pub(super) fn label_editor(label: &str, theme: &Theme, face: &Face) -> impl Bundle {
     (
         Editor,
         LabelBox,
@@ -71,10 +69,14 @@ pub(super) fn label_editor(label: &str, theme: &Theme) -> impl Bundle {
         },
         BackgroundColor(theme.color(BACKGROUND).with_alpha(WELL)),
         EditableText::new(label),
-        TextFont::from_font_size(BODY),
-        TextColor(fg),
+        TextFont {
+            font: face.source.clone(),
+            font_smoothing: face.smoothing,
+            ..TextFont::from_font_size(BODY)
+        },
+        TextColor(face.ink),
         TextCursorStyle {
-            color: fg,
+            color: face.ink,
             ..default()
         },
         AutoFocus,
@@ -131,17 +133,13 @@ pub(super) fn release_field(
 
 // Source while editing, rendered at rest: the buffer is the node's raw markdown,
 // and the styled span tree is never edited.
-pub(super) fn editor(md: &str, fg: Color, raster: f32) -> impl Bundle {
-    let mut buffer = EditableText {
+pub(super) fn editor(md: &str, face: &Face, raster: f32) -> impl Bundle {
+    let buffer = EditableText {
         allow_newlines: true,
         // The node's own height, not a line count.
         visible_lines: None,
         ..EditableText::new(md)
     };
-    // Open at the top. `new` leaves the caret at the end, and the editor scrolls
-    // to keep it in view, so a source taller than its node opens mid-text with
-    // the caret's own width scrolled off the left.
-    buffer.queue_edit(TextEdit::TextStart(false));
 
     (
         Editor,
@@ -156,11 +154,15 @@ pub(super) fn editor(md: &str, fg: Color, raster: f32) -> impl Bundle {
             linebreak: LineBreak::WordOrCharacter,
             ..default()
         },
-        TextFont::from_font_size(BODY * raster),
-        TextColor(fg),
+        TextFont {
+            font: face.source.clone(),
+            font_smoothing: face.smoothing,
+            ..TextFont::from_font_size(BODY * raster)
+        },
+        TextColor(face.ink),
         // The default caret is slate, which on a coloured node rect is invisible.
         TextCursorStyle {
-            color: fg,
+            color: face.ink,
             ..default()
         },
         AutoFocus,

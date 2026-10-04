@@ -39,6 +39,8 @@ impl UiMaterial for PolygonMaterial {
 
 type Look = (u8, [u32; 4], [u32; 4], [u32; 2], u32);
 
+const LOOKS: usize = 512;
+
 // One per look, not per node: the UI batches what shares a handle.
 #[derive(Resource, Default)]
 pub struct Palette(HashMap<Look, Handle<PolygonMaterial>>);
@@ -60,6 +62,9 @@ pub fn paint(
     let outline = outline_color(theme, node).to_linear().to_f32_array();
     let size = Vec2::new(node.width as f32, node.height as f32);
     let edge = outline_px(node);
+    if palette.0.len() > LOOKS {
+        palette.0.clear();
+    }
     palette
         .0
         .entry((

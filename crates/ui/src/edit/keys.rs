@@ -1,17 +1,22 @@
+use bevy::clipboard::{Clipboard, ClipboardRead};
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
-use extboard_core::{Canvas, NodeKind, fresh_id};
+use extboard_core::{Canvas, Node as CanvasNode, NodeKind, fresh_id};
 
 use crate::client::Document;
-use crate::node::{NodeId, NodeKind as Kind, NodeRect};
+use crate::node::{NodeId, NodeKind as Kind, NodeRect, to_world};
 use crate::scene::EdgeId;
-use crate::select::{Selected, bounds};
+use crate::select::{Selected, bounds, cursor_world};
 
+use super::drop::Uploads;
 use super::{GRID, added, moved, with_contents};
 
 // Room around the selection a new group gets, so its contents are not flush
 // against its own outline.
 const GROUP_PAD: f32 = 24.0;
+
+#[cfg(not(target_arch = "wasm32"))]
+const PASTED: &str = "pasted.png";
 
 pub fn command(keys: &ButtonInput<KeyCode>) -> bool {
     keys.any_pressed([
@@ -124,6 +129,149 @@ pub fn duplicated(canvas: &mut Canvas, seed: u32, ids: &[&str]) -> Vec<String> {
         .collect()
 }
 
+#[derive(Resource, Default)]
+pub(super) struct Pasting(Option<(ClipboardRead, Vec2)>);
+
+pub(super) fn copy(
+    keys: Res<ButtonInput<KeyCode>>,
+    selected: Query<&NodeId, With<Selected>>,
+    document: Res<Document>,
+    mut clipboard: ResMut<Clipboard>,
+) {
+    if !command(&keys) || !keys.just_pressed(KeyCode::KeyC) || selected.is_empty() {
+        return;
+    }
+    let ids: Vec<&str> = selected.iter().map(|id| id.0.as_str()).collect();
+    match copied(&document.0, &ids) {
+        Ok(json) => {
+            if let Err(e) = clipboard.set_text(json) {
+                warn!("clipboard: {e}");
+            }
+        }
+        Err(e) => warn!("copy: {e}"),
+    }
+}
+
+pub fn copied(canvas: &Canvas, ids: &[&str]) -> Result<String, serde_json::Error> {
+    let nodes: Vec<&CanvasNode> = canvas
+        .nodes
+        .iter()
+        .filter(|node| ids.contains(&node.id.as_str()))
+        .collect();
+    serde_json::to_string_pretty(&nodes)
+}
+
+pub(super) fn paste(
+    keys: Res<ButtonInput<KeyCode>>,
+    window: Single<&Window>,
+    camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    uploads: Res<Uploads>,
+    mut clipboard: ResMut<Clipboard>,
+    mut pasting: ResMut<Pasting>,
+) {
+    if !command(&keys) || !keys.just_pressed(KeyCode::KeyV) {
+        return;
+    }
+    if took_an_image(&mut clipboard, &uploads, window.cursor_position()) {
+        return;
+    }
+    let Some(world) = cursor_world(&window, *camera) else {
+        return;
+    };
+    pasting.0 = Some((clipboard.fetch_text(), world));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn took_an_image(clipboard: &mut Clipboard, uploads: &Uploads, screen: Option<Vec2>) -> bool {
+    let Ok(image) = clipboard.fetch_image() else {
+        return false;
+    };
+    match png_bytes(image) {
+        Ok(bytes) => super::drop::upload(uploads, PASTED, bytes, screen),
+        Err(e) => warn!("paste: {e}"),
+    }
+    true
+}
+
+// The tab reads a pasted image off its own `paste` event instead: arboard, which
+// is what `fetch_image` reads, is not built for wasm. See drop.rs.
+#[cfg(target_arch = "wasm32")]
+fn took_an_image(_: &mut Clipboard, _: &Uploads, _: Option<Vec2>) -> bool {
+    false
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn png_bytes(image: Image) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    image
+        .try_into_dynamic()
+        .map_err(|e| e.to_string())?
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+pub(super) fn pasted_nodes(
+    frames: Res<FrameCount>,
+    mut pasting: ResMut<Pasting>,
+    mut document: ResMut<Document>,
+) {
+    let Some((read, world)) = pasting.0.as_mut() else {
+        return;
+    };
+    let (text, world) = (read.poll_result(), *world);
+    let Some(text) = text else {
+        return;
+    };
+    pasting.0 = None;
+    match text {
+        Ok(text) => {
+            if pasted(&mut document.0, frames.0, &text, world).is_empty() {
+                info!("paste: the clipboard holds no canvas nodes");
+            }
+        }
+        Err(e) => warn!("paste: {e}"),
+    }
+}
+
+pub fn pasted(canvas: &mut Canvas, seed: u32, json: &str, at: Vec2) -> Vec<String> {
+    let mut nodes = match parsed(json) {
+        Some(nodes) if !nodes.is_empty() => nodes,
+        _ => return Vec::new(),
+    };
+    let cursor = to_world(at);
+    let min = nodes.iter().fold(Vec2::MAX, |min, node| {
+        min.min(Vec2::new(node.x as f32, node.y as f32))
+    });
+    let max = nodes.iter().fold(Vec2::MIN, |max, node| {
+        max.max(Vec2::new(
+            (node.x + node.width) as f32,
+            (node.y + node.height) as f32,
+        ))
+    });
+    let delta = cursor - (min + max) / 2.0;
+
+    nodes
+        .iter_mut()
+        .enumerate()
+        .map(|(index, node)| {
+            node.id = fresh_id(canvas, &(seed.wrapping_add(index as u32)).to_le_bytes());
+            node.x += delta.x.round() as i64;
+            node.y += delta.y.round() as i64;
+            canvas
+                .add_node(node.clone())
+                .expect("fresh_id never collides");
+            node.id.clone()
+        })
+        .collect()
+}
+
+fn parsed(json: &str) -> Option<Vec<CanvasNode>> {
+    serde_json::from_str::<Vec<CanvasNode>>(json)
+        .or_else(|_| serde_json::from_str::<CanvasNode>(json).map(|node| vec![node]))
+        .ok()
+}
+
 pub(super) fn group(
     keys: Res<ButtonInput<KeyCode>>,
     frames: Res<FrameCount>,
@@ -194,6 +342,93 @@ mod tests {
             );
             assert_eq!((copy.width, copy.height), (original.width, original.height));
         }
+    }
+
+    #[test]
+    fn a_paste_lands_centred_on_the_cursor_under_fresh_ids() {
+        let mut canvas = canvas();
+        let first = created(&mut canvas, 1, rect(0.0, 0.0));
+        let second = created(&mut canvas, 2, rect(400.0, 0.0));
+        let json = copied(&canvas, &[&first, &second]).expect("nodes serialize");
+
+        let at = Vec2::new(1000.0, -300.0);
+        let ids = pasted(&mut canvas, 3, &json, at);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(canvas.nodes.len(), 4);
+        assert!(!ids.contains(&first) && !ids.contains(&second));
+
+        let box_of = |ids: &[String]| {
+            ids.iter().fold((Vec2::MAX, Vec2::MIN), |(min, max), id| {
+                let node = canvas.nodes.iter().find(|node| &node.id == id).unwrap();
+                (
+                    min.min(Vec2::new(node.x as f32, node.y as f32)),
+                    max.max(Vec2::new(
+                        (node.x + node.width) as f32,
+                        (node.y + node.height) as f32,
+                    )),
+                )
+            })
+        };
+        let (min, max) = box_of(&ids);
+        assert_eq!((min + max) / 2.0, Vec2::new(1000.0, 300.0));
+        let (was_min, was_max) = box_of(&[first, second]);
+        assert_eq!(max - min, was_max - was_min);
+    }
+
+    #[test]
+    fn a_paste_takes_one_node_or_a_whole_array_and_ignores_anything_else() {
+        let mut canvas = canvas();
+        let one = created(&mut canvas, 1, rect(0.0, 0.0));
+        let object =
+            serde_json::to_string(canvas.nodes.iter().find(|node| node.id == one).unwrap())
+                .expect("a node serializes");
+        assert_eq!(pasted(&mut canvas, 2, &object, Vec2::ZERO).len(), 1);
+
+        for junk in ["", "not json", "[]", "{}", "[1,2,3]", r#""a string""#] {
+            assert!(
+                pasted(&mut canvas, 3, junk, Vec2::ZERO).is_empty(),
+                "{junk:?} pasted something"
+            );
+        }
+        assert_eq!(canvas.nodes.len(), 2, "and nothing was added either");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_clipboard_image_is_encoded_as_a_png_and_a_bad_one_says_so() {
+        use bevy::asset::RenderAssetUsages;
+        use bevy::image::Image;
+        use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+
+        let size = Extent3d {
+            width: 2,
+            height: 2,
+            depth_or_array_layers: 1,
+        };
+        let rgba = Image::new(
+            size,
+            TextureDimension::D2,
+            vec![255; 2 * 2 * 4],
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::default(),
+        );
+        let png = png_bytes(rgba).expect("rgba encodes");
+        assert_eq!(
+            &png[..8],
+            b"\x89PNG\r\n\x1a\n",
+            "not a png: {:?}",
+            &png[..8]
+        );
+        assert!(extboard_core::is_image(PASTED));
+
+        let float = Image::new(
+            size,
+            TextureDimension::D2,
+            vec![0; 2 * 2 * 16],
+            TextureFormat::Rgba32Float,
+            RenderAssetUsages::default(),
+        );
+        assert!(png_bytes(float).is_err());
     }
 
     #[test]

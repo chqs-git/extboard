@@ -70,7 +70,22 @@ bevy = { version = "0.19", default-features = false, features = [
 # the list above rather than replacing it. A wasm tab gets no threads without
 # cross-origin isolation, so multi_threaded is dead bytes there.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-bevy = { version = "0.19", default-features = false, features = ["multi_threaded"] }
+# `clipboard_image` is native-only on purpose: bevy_clipboard's `fetch_image`
+# reads an `arboard` handle, and arboard is not built for wasm -- the tab reads a
+# pasted image off its own `paste` event instead. See edit/drop.rs.
+bevy = { version = "0.19", default-features = false, features = [
+  "multi_threaded",
+  "clipboard_image",
+  # Images from a remote extd: `asset_path` hands the asset server an
+  # `http(s)://` path and these are the readers for it. A tab needs neither --
+  # there the spaces dir is same-origin already.
+  "http",
+  "https",
+] }
+# The PNG encoder for a pasted screenshot: arboard hands over raw RGBA and the
+# spaces dir holds files. Already in the tree under `bevy_image`, so this
+# declares what is there rather than adding anything.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 bevy = { version = "0.19", default-features = false, features = ["webgl2"] }
@@ -87,6 +102,7 @@ web-sys = { version = "0.3", features = [
   "DataTransfer",
   "FileList",
   "File",
+  "ClipboardEvent",
   "Blob",
   "FileReader",
 ] }

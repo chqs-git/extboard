@@ -1,5 +1,5 @@
 use super::*;
-use extboard_core::{ACCENT, BACKGROUND, Canvas, PRESETS};
+use extboard_core::{ACCENT, BACKGROUND, Canvas, PRESETS, SECONDARY};
 
 fn canvas() -> Canvas {
     serde_json::from_str(r#"{"nodes":[],"edges":[]}"#).expect("fixture")
@@ -32,6 +32,7 @@ fn rooted(assets: AssetPlugin) -> App {
         .init_resource::<InputFocus>()
         .init_resource::<ClearColor>()
         .init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<ButtonInput<MouseButton>>()
         .insert_resource(Document(canvas()));
     app
 }
@@ -530,7 +531,14 @@ fn the_primary_text_is_the_embedded_font_until_a_font_is_loaded() {
     let mut app = app();
     app.world_mut().run_schedule(Update);
     let font = |app: &App| app.world().resource::<Theme>().text_font(PRIMARY_TEXT);
-    assert_eq!(font(&app), FontSource::default());
+    let named = |app: &App| {
+        app.world()
+            .resource::<Theme>()
+            .fonts
+            .font(PRIMARY_TEXT)
+            .map(str::to_owned)
+    };
+    assert_eq!(named(&app).as_deref(), Some(DEFAULT_FONT));
 
     let mut fonts = Fonts::default();
     fonts.add("fonts/Inter.ttf");
@@ -541,11 +549,46 @@ fn the_primary_text_is_the_embedded_font_until_a_font_is_loaded() {
         .set_fonts(&fonts);
     app.world_mut().run_schedule(Update);
     assert!(matches!(font(&app), FontSource::Handle(_)));
-    // And the two nothing reads yet stay unset.
     assert_eq!(
-        app.world().resource::<Theme>().text_font(1),
+        app.world().resource::<Theme>().text_font(2),
         FontSource::default()
     );
+}
+
+#[test]
+fn a_code_run_takes_the_secondary_text_and_the_embedded_font_when_there_is_none() {
+    let mut app = app();
+    app.world_mut().run_schedule(Update);
+    let code = |app: &App| app.world().resource::<Theme>().code_face();
+    let default = app.world().resource::<Theme>().source(DEFAULT_FONT);
+    assert_eq!(code(&app).source, default, "no secondary text: the default");
+
+    let mut fonts = Fonts::default();
+    fonts.add("fonts/Inter.ttf");
+    fonts.set(PRIMARY_TEXT, "fonts/Inter.ttf");
+    app.world_mut()
+        .resource_mut::<Document>()
+        .0
+        .set_fonts(&fonts);
+    app.world_mut().run_schedule(Update);
+    assert_eq!(
+        code(&app).source,
+        default,
+        "the primary text is not the code text"
+    );
+
+    fonts.add("fonts/Mono.ttf");
+    fonts.set(SECONDARY_TEXT, "fonts/Mono.ttf");
+    app.world_mut()
+        .resource_mut::<Document>()
+        .0
+        .set_fonts(&fonts);
+    app.world_mut().run_schedule(Update);
+    assert!(matches!(code(&app).source, FontSource::Handle(_)));
+
+    let theme = app.world().resource::<Theme>();
+    assert_eq!(theme.code_face().ink, theme.color(ACCENT));
+    assert_ne!(theme.code_face().ink, theme.color(SECONDARY));
 }
 
 // Three rows, never more and never fewer: a text cannot be added or removed.

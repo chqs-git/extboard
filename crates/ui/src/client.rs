@@ -8,10 +8,41 @@ use std::time::Duration;
 // extd serves the bundle on wasm, so a relative path is same-origin and needs
 // no CORS. Native has no origin to be relative to.
 #[cfg(target_arch = "wasm32")]
-pub const BASE_URL: &str = "";
-// extd's default port
+pub fn base_url() -> &'static str {
+    ""
+}
+
 #[cfg(not(target_arch = "wasm32"))]
-pub const BASE_URL: &str = "http://127.0.0.1:7777";
+fn remote() -> Option<&'static str> {
+    static URL: std::sync::LazyLock<Option<String>> =
+        std::sync::LazyLock::new(|| std::env::var("EXTBOARD_SERVER").ok());
+    URL.as_deref().map(|url| url.trim_end_matches('/'))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn base_url() -> &'static str {
+    remote().unwrap_or("http://127.0.0.1:7777")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn asset_path(file: &str) -> String {
+    spaces_file(remote(), file)
+}
+
+// `url_path` is what the upload and the phone view already use: a space in
+// `my holiday.png` is a URL ureq refuses, and a `#` is an asset label.
+#[cfg(not(target_arch = "wasm32"))]
+fn spaces_file(base: Option<&str>, file: &str) -> String {
+    match base {
+        Some(base) => format!("{base}/f/{}", extboard_core::url_path(file)),
+        None => file.to_owned(),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn asset_path(file: &str) -> String {
+    file.to_owned()
+}
 const RETRY_SECS: f32 = 2.0;
 
 // Where a `file` node's path resolves from: extd's spaces dir. In the browser
@@ -223,7 +254,7 @@ fn show_notice(
 }
 
 pub fn space_url(space: &str) -> String {
-    format!("{BASE_URL}/api/spaces/{space}")
+    format!("{}/api/spaces/{space}", base_url())
 }
 
 fn fetch(inbox: &Inbox, rev: &str, space: &str) {
@@ -250,7 +281,8 @@ fn loaded(space: &str, result: ehttp::Result<ehttp::Response>) -> Option<Update>
         Ok(response) => response,
         Err(e) => {
             return Some(Update::Failed(format!(
-                "extd unreachable at {BASE_URL}: {e}"
+                "extd unreachable at {}: {e}",
+                base_url()
             )));
         }
     };
@@ -290,7 +322,7 @@ pub fn etag_rev(response: &ehttp::Response) -> String {
 }
 
 fn subscribe(inbox: &Inbox) {
-    let mut request = ehttp::Request::get(format!("{BASE_URL}/api/events"));
+    let mut request = ehttp::Request::get(format!("{}/api/events", base_url()));
     request.timeout = None; // the stream is meant to stay open
 
     let inbox = inbox.clone();
@@ -371,6 +403,19 @@ mod tests {
         assert_eq!(space_from_path("/"), None);
         assert_eq!(space_from_path("/s/"), None);
         assert_eq!(space_from_path("/v/kitchen-sink"), None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_remote_spaces_file_is_a_url_and_a_local_one_is_a_bare_path() {
+        assert_eq!(
+            spaces_file(Some("https://box.ts.net"), "images/my holiday.png"),
+            "https://box.ts.net/f/images/my%20holiday.png"
+        );
+        assert_eq!(
+            spaces_file(None, "images/my holiday.png"),
+            "images/my holiday.png"
+        );
     }
 
     fn response(status: u16, body: &str) -> ehttp::Response {

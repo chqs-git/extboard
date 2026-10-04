@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::camera::screen_to_world;
-use crate::client::{BASE_URL, Document};
+use crate::client::{Document, base_url};
 use crate::theme::write_fonts;
 
 use super::added;
@@ -54,12 +54,15 @@ pub(super) fn dropped(
 
 // extd owns the spaces dir on both targets: the browser cannot write to it at
 // all, and one uploader beats two ways of putting a file in one directory.
-fn upload(uploads: &Uploads, name: &str, bytes: Vec<u8>, screen: Option<Vec2>) {
+pub(super) fn upload(uploads: &Uploads, name: &str, bytes: Vec<u8>, screen: Option<Vec2>) {
     if !is_image(name) && !is_font(name) {
         warn!("{name} is neither an image nor a font, so nothing was added");
         return;
     }
-    let request = ehttp::Request::post(format!("{BASE_URL}/api/files/{}", url_path(name)), bytes);
+    let request = ehttp::Request::post(
+        format!("{}/api/files/{}", base_url(), url_path(name)),
+        bytes,
+    );
 
     let uploads = uploads.clone();
     ehttp::fetch(request, move |result| match result {
@@ -141,6 +144,26 @@ pub(super) fn listen(uploads: Res<Uploads>) {
         let _ = document.add_event_listener_with_callback(name, over.as_ref().unchecked_ref());
     }
     over.forget();
+
+    let pasting = uploads.clone();
+    let pasted = Closure::<dyn FnMut(web_sys::ClipboardEvent)>::new(
+        move |event: web_sys::ClipboardEvent| {
+            let Some(files) = event.clipboard_data().and_then(|data| data.files()) else {
+                return;
+            };
+            if files.length() == 0 {
+                return;
+            }
+            event.prevent_default();
+            for i in 0..files.length() {
+                if let Some(file) = files.get(i) {
+                    read(&pasting, &file, None);
+                }
+            }
+        },
+    );
+    let _ = document.add_event_listener_with_callback("paste", pasted.as_ref().unchecked_ref());
+    pasted.forget();
 
     let uploads = uploads.clone();
     let dropped =

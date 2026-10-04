@@ -1,7 +1,7 @@
 use super::edit_text::written_back;
 use super::panel::centre_scale_offset;
 use super::*;
-use extboard_core::{Canvas, Edge};
+use extboard_core::{ACCENT, Canvas, Edge};
 
 // The scaled content's corner, relative to the clip box's. Non-zero clips.
 fn content_top_left(size: Vec2, zoom: f32) -> Vec2 {
@@ -190,9 +190,10 @@ fn a_link_and_a_code_span_are_the_themes_rather_than_fixed_colours() {
         link,
     };
     let face = theme.face(None, None);
-    let body = color(&span(false, false), &theme, &face);
-    let link = color(&span(false, true), &theme, &face);
-    let mono = color(&span(true, false), &theme, &face);
+    let code = theme.code_face();
+    let body = color(&span(false, false), &theme, &face, &code);
+    let link = color(&span(false, true), &theme, &face, &code);
+    let mono = color(&span(true, false), &theme, &face, &code);
     assert_eq!(body, theme.color(TEXT));
     assert_eq!(link, theme.color(PRIMARY));
     assert_eq!(mono, theme.color(ACCENT));
@@ -202,11 +203,23 @@ fn a_link_and_a_code_span_are_the_themes_rather_than_fixed_colours() {
     // that are not body text where they are.
     let painted = theme.face(None, Some("1"));
     assert_eq!(
-        color(&span(false, false), &theme, &painted),
+        color(&span(false, false), &theme, &painted, &code),
         theme.color(PRIMARY)
     );
-    assert_eq!(color(&span(false, true), &theme, &painted), link);
-    assert_eq!(color(&span(true, false), &theme, &painted), mono);
+    assert_eq!(color(&span(false, true), &theme, &painted, &code), link);
+    assert_eq!(color(&span(true, false), &theme, &painted, &code), mono);
+}
+
+// bevy clips an editor to its content box as laid out, before the panel's scale
+// reaches it, so any stretch at all is glyphs cut off at the left and the top.
+#[test]
+fn an_editing_session_is_never_stretched() {
+    for zoom in [0.25, 1.0, 1.19, 1.2, 2.4, 3.6, 5.0, 8.0] {
+        let scale = zoom / editing_raster(zoom);
+        assert!(scale <= 1.0, "zoom {zoom}: scaled by {scale}");
+    }
+    // The slack a drawn panel is allowed is the stretch that cut the text.
+    assert!(1.2 / raster_tier(1.2) > 1.0);
 }
 
 // The tier only trades layout size for transform scale: the glyphs are
