@@ -3,7 +3,6 @@ mod cli;
 mod events;
 mod project;
 mod store;
-mod view;
 
 use clap::Parser;
 

@@ -13,7 +13,8 @@
   html, body { margin: 0; height: 100%; background: #12121a; overflow: hidden; }
   /* The size is `fit_canvas_to_parent`'s, written inline on the canvas; `block`
      is still ours, or the inline baseline leaves a gap under it. */
-  canvas { display: block; }
+  /* `touch-action` and not `user-scalable=no`, which Safari ignores. */
+  canvas { display: block; touch-action: none; }
 </style>
 </head>
 <body></body>

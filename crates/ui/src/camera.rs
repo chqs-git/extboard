@@ -1,4 +1,5 @@
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::input::touch::Touches;
 use bevy::prelude::*;
 use extboard_core::{Canvas, Node as CanvasNode};
 
@@ -23,6 +24,7 @@ impl Plugin for CameraPlugin {
                     arrive.run_if(resource_exists_and_changed::<Document>),
                     pan,
                     zoom,
+                    fingers,
                 )
                     .chain(),
             );
@@ -95,9 +97,59 @@ fn pan(
         return;
     };
 
-    // The content follows the cursor, so the camera moves the opposite way.
-    transform.translation.x -= motion.delta.x * ortho.scale;
-    transform.translation.y += motion.delta.y * ortho.scale;
+    drag(&mut transform, motion.delta, ortho.scale);
+}
+
+// The content follows the pointer, so the camera moves the opposite way.
+fn drag(transform: &mut Transform, delta: Vec2, scale: f32) {
+    transform.translation.x -= delta.x * scale;
+    transform.translation.y += delta.y * scale;
+}
+
+// One finger drags the board, two pinch it.
+fn fingers(
+    touches: Res<Touches>,
+    window: Single<&Window>,
+    camera: Single<(&mut Transform, &mut Projection, &mut ZoomTarget), With<Camera2d>>,
+    mut span: Local<Option<f32>>,
+) {
+    let (mut transform, mut projection, mut target) = camera.into_inner();
+    let Projection::Orthographic(ortho) = &mut *projection else {
+        return;
+    };
+    let touching: Vec<&_> = touches.iter().collect();
+    if touching.len() != 2 {
+        *span = None;
+        if let [one] = touching[..] {
+            drag(&mut transform, one.delta(), ortho.scale);
+        }
+        return;
+    }
+    let (a, b) = (touching[0], touching[1]);
+
+    drag(&mut transform, (a.delta() + b.delta()) / 2.0, ortho.scale);
+
+    let now = a.position().distance(b.position());
+    let Some(was) = span.replace(now) else {
+        return;
+    };
+    if now < 1.0 || was < 1.0 {
+        return;
+    }
+    let old = ortho.scale;
+    let new = pinched(old, was, now);
+    ortho.scale = new;
+    // `zoom` eases towards this; leaving it stale would snap the pinch back.
+    target.0 = new;
+
+    let cam = transform.translation.truncate();
+    let mid = (a.position() + b.position()) / 2.0;
+    let anchor = cursor_world(mid, window.size(), cam, old);
+    transform.translation = zoom_anchored(cam, anchor, old, new).extend(transform.translation.z);
+}
+
+fn pinched(old: f32, was: f32, now: f32) -> f32 {
+    (old * was / now).clamp(ZOOM_MIN, ZOOM_MAX)
 }
 
 fn zoom(
@@ -181,6 +233,15 @@ mod tests {
                 "anchor drifted: {before} -> {after}"
             );
         }
+    }
+
+    #[test]
+    fn spreading_two_fingers_zooms_in() {
+        assert_eq!(pinched(1.0, 100.0, 200.0), 0.5);
+        assert_eq!(pinched(1.0, 200.0, 100.0), 2.0);
+        assert_eq!(pinched(1.0, 100.0, 100.0), 1.0);
+        assert_eq!(pinched(ZOOM_MIN, 100.0, 1e6), ZOOM_MIN);
+        assert_eq!(pinched(ZOOM_MAX, 1e6, 100.0), ZOOM_MAX);
     }
 
     #[test]
