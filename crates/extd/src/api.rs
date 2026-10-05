@@ -1,11 +1,10 @@
 use crate::events::{Events, events, watch};
 use crate::store::{Store, StoreError};
-use crate::view;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::header::{CONTENT_TYPE, ETAG, IF_MATCH, IF_NONE_MATCH};
 use axum::http::{HeaderMap, HeaderName, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use extboard_core::{Canvas, is_font, is_image, rev, validate};
@@ -71,19 +70,8 @@ fn router(state: AppState, dir: PathBuf) -> Router {
             "/api/files/{name}",
             post(upload).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)),
         )
-        .route("/v/{id}", get(view_space))
         .nest_service("/f", ServeDir::new(dir))
         .with_state(state)
-}
-
-// The phone path: one page, no JS, no fetches.
-async fn view_space(
-    State(app): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Html<String>, StoreError> {
-    let space = app.store.space(&id)?;
-    let canvas = space.read().await.load()?;
-    Ok(Html(view::page(&id, &canvas)))
 }
 
 async fn health(State(app): State<AppState>) -> Result<&'static str, StatusCode> {

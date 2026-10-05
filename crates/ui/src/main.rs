@@ -55,6 +55,12 @@ fn main() {
     App::new()
         .add_plugins(plugins)
         .insert_resource(ClearColor(theme::DARK))
+        // A finger navigates, it does not edit: picking on touch would drag
+        // whatever node a one-finger pan started on.
+        .insert_resource(bevy::picking::input::PointerInputSettings {
+            is_touch_enabled: false,
+            is_mouse_enabled: true,
+        })
         .add_plugins((
             camera::CameraPlugin,
             client::ClientPlugin,

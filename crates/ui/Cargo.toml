@@ -35,6 +35,8 @@ bevy = { version = "0.19", default-features = false, features = [
   "bevy_winit",
   "keyboard",
   "mouse",
+  # phone navigation: without it bevy_input compiles Touches out entirely
+  "touch",
   # 2D render path
   "bevy_render",
   # E8-T4's image nodes, over `is_image`'s list minus svg and avif, which only
