@@ -17,14 +17,14 @@ impl Plugin for HudPlugin {
 fn spawn_fps(mut commands: Commands) {
     commands.spawn((
         FpsText,
-        // Node panels are UI too and spawn later.
+        // Node panels are UI too and spawn later. Under the space's name.
         GlobalZIndex(1),
         Text::new("-- fps"),
         TextFont::from_font_size(14.0),
         TextColor(Color::srgb(0.45, 0.5, 0.55)),
         Node {
             position_type: PositionType::Absolute,
-            top: Val::Px(8.0),
+            top: Val::Px(28.0),
             left: Val::Px(8.0),
             ..default()
         },

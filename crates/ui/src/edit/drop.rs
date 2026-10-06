@@ -1,5 +1,7 @@
 use bevy::diagnostic::FrameCount;
+use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
+use bevy::text::{EditableText, TextEdit};
 use extboard_core::{NodeKind, PRIMARY_TEXT, is_font, is_image, url_path};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -14,12 +16,22 @@ use super::added;
 const DROP_SIZE: Vec2 = Vec2::new(320.0, 240.0);
 const CAPTION_SIZE: Vec2 = Vec2::new(320.0, 60.0);
 
-// A file extd has written into the spaces dir: its path there, and where on
-// screen it was dropped. Screen rather than world, because on the web the drop
-// is a DOM event with no camera in reach.
-struct Landed {
-    file: String,
-    screen: Option<Vec2>,
+// What a drop or a paste leaves for the app: a file extd has written into the
+// spaces dir and where on screen it arrived, or clipboard text to paste as
+// nodes. Screen rather than world, because a DOM event has no camera in reach.
+enum Landed {
+    File {
+        file: String,
+        screen: Option<Vec2>,
+    },
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        expect(
+            dead_code,
+            reason = "natively `keys::paste` reads the clipboard itself"
+        )
+    )]
+    Nodes(String),
 }
 
 // Uploads answer off-thread, so the node they add waits for a frame.
@@ -68,7 +80,7 @@ pub(super) fn upload(uploads: &Uploads, name: &str, bytes: Vec<u8>, screen: Opti
     ehttp::fetch(request, move |result| match result {
         // The reply is the path extd settled on, which is not always the name
         // we sent: it never overwrites.
-        Ok(response) if response.ok => lock(&uploads).push(Landed {
+        Ok(response) if response.ok => lock(&uploads).push(Landed::File {
             file: String::from_utf8_lossy(&response.bytes).into_owned(),
             screen,
         }),
@@ -80,11 +92,31 @@ pub(super) fn upload(uploads: &Uploads, name: &str, bytes: Vec<u8>, screen: Opti
 pub(super) fn landed(
     uploads: Res<Uploads>,
     frames: Res<FrameCount>,
+    window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    focus: Res<InputFocus>,
+    mut editors: Query<&mut EditableText>,
     mut document: ResMut<Document>,
 ) {
     let (camera, cam_global) = *camera;
-    for Landed { file, screen } in std::mem::take(&mut *lock(&uploads)) {
+    for item in std::mem::take(&mut *lock(&uploads)) {
+        let (file, screen) = match item {
+            Landed::File { file, screen } => (file, screen),
+            // Whatever holds the keyboard takes it at the caret, the way bevy's
+            // own editor would on a key it never sees on this target.
+            Landed::Nodes(text) => {
+                match focus.get().and_then(|entity| editors.get_mut(entity).ok()) {
+                    Some(mut editor) => editor.queue_edit(TextEdit::Insert(text.as_str().into())),
+                    None => {
+                        let at = world(camera, cam_global, window.cursor_position());
+                        if super::keys::pasted(&mut document.0, frames.0, &text, at).is_empty() {
+                            info!("paste: the clipboard holds no canvas nodes");
+                        }
+                    }
+                }
+                continue;
+            }
+        };
         // A font is the space's, not a node's: it lands in the library and
         // takes the primary text, because every text on the board follows that
         // one -- a drop you cannot see is a drop that did not work.
@@ -96,9 +128,7 @@ pub(super) fn landed(
             continue;
         }
 
-        let at = screen
-            .and_then(|at| screen_to_world(camera, cam_global, at))
-            .unwrap_or(cam_global.translation().truncate());
+        let at = world(camera, cam_global, screen);
         added(
             &mut document.0,
             frames.0,
@@ -124,6 +154,14 @@ pub(super) fn landed(
     }
 }
 
+// Where a drop or a paste lands: where the pointer put it, else the middle of
+// the view.
+fn world(camera: &Camera, cam_global: &GlobalTransform, screen: Option<Vec2>) -> Vec2 {
+    screen
+        .and_then(|at| screen_to_world(camera, cam_global, at))
+        .unwrap_or(cam_global.translation().truncate())
+}
+
 // A browser drop is a DOM event: bevy's winit gives us a filename with no
 // bytes behind it, so the page's own listener is what reads the file.
 #[cfg(target_arch = "wasm32")]
@@ -145,20 +183,44 @@ pub(super) fn listen(uploads: Res<Uploads>) {
     }
     over.forget();
 
+    // winit prevents the default on every keydown the canvas sees, and a
+    // prevented command-V is a paste the browser never performs: no `paste`
+    // event, no image. The capture phase is what takes the combo first.
+    let combo =
+        Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(|event: web_sys::KeyboardEvent| {
+            if (event.meta_key() || event.ctrl_key()) && event.key().eq_ignore_ascii_case("v") {
+                event.stop_propagation();
+            }
+        });
+    let _ = document.add_event_listener_with_callback_and_bool(
+        "keydown",
+        combo.as_ref().unchecked_ref(),
+        true,
+    );
+    combo.forget();
+
     let pasting = uploads.clone();
     let pasted = Closure::<dyn FnMut(web_sys::ClipboardEvent)>::new(
         move |event: web_sys::ClipboardEvent| {
-            let Some(files) = event.clipboard_data().and_then(|data| data.files()) else {
+            let Some(data) = event.clipboard_data() else {
                 return;
             };
-            if files.length() == 0 {
+            if let Some(files) = data.files().filter(|files| files.length() > 0) {
+                event.prevent_default();
+                for i in 0..files.length() {
+                    if let Some(file) = files.get(i) {
+                        read(&pasting, &file, None);
+                    }
+                }
                 return;
             }
-            event.prevent_default();
-            for i in 0..files.length() {
-                if let Some(file) = files.get(i) {
-                    read(&pasting, &file, None);
-                }
+            // Nodes come off the same event: bevy never sees the key, so this
+            // is the whole of a paste on this target.
+            if let Ok(text) = data.get_data("text/plain")
+                && !text.is_empty()
+            {
+                event.prevent_default();
+                lock(&pasting).push(Landed::Nodes(text));
             }
         },
     );

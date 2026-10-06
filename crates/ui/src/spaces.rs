@@ -1,4 +1,6 @@
+use bevy::input_focus::AutoFocus;
 use bevy::prelude::*;
+use bevy::text::{EditableText, TextCursorStyle};
 use extboard_core::{Canvas, NodeKind, space_path};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -27,6 +29,7 @@ pub struct SpacesPlugin;
 enum Reply {
     Listed(Vec<String>),
     Created(String),
+    Renamed { from: String, to: String },
     Failed(String),
 }
 
@@ -45,17 +48,31 @@ struct Pending(Inbox);
 #[derive(Component)]
 struct Chrome;
 
+// The tile a right-click opened the menu on, and where on screen.
+#[derive(Resource, Default)]
+struct Menu(Option<(String, Vec2)>);
+
+// The space whose tile is a text field for now.
+#[derive(Resource, Default)]
+struct Renaming(Option<String>);
+
+#[derive(Component)]
+struct RenameField;
+
 #[derive(Component, Clone)]
 enum Hit {
     Open(String),
     New,
     Back,
+    Rename(String),
 }
 
 impl Plugin for SpacesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Spaces>()
             .init_resource::<Pending>()
+            .init_resource::<Menu>()
+            .init_resource::<Renaming>()
             .add_systems(
                 Update,
                 (
@@ -63,7 +80,13 @@ impl Plugin for SpacesPlugin {
                     // way the app opened, the list behind it is current.
                     refresh.run_if(resource_changed::<Space>),
                     receive,
-                    draw.run_if(resource_changed::<Spaces>.or_else(resource_changed::<Space>)),
+                    commit,
+                    draw.run_if(
+                        resource_changed::<Spaces>
+                            .or_else(resource_changed::<Space>)
+                            .or_else(resource_changed::<Menu>)
+                            .or_else(resource_changed::<Renaming>),
+                    ),
                 )
                     .chain(),
             );
@@ -114,7 +137,54 @@ fn created(id: String, result: ehttp::Result<ehttp::Response>) -> Reply {
     }
 }
 
-// The first `untitled` nobody has taken. Naming is the rename this has not got.
+fn rename(pending: &Pending, from: String, to: String) {
+    let inbox = pending.0.clone();
+    let request = ehttp::Request::post(format!("{}/rename", space_url(&from)), to.clone().into());
+    ehttp::fetch(request, move |result| {
+        lock(&inbox).push(renamed(from, to, result));
+    });
+}
+
+fn renamed(from: String, to: String, result: ehttp::Result<ehttp::Response>) -> Reply {
+    match result {
+        Err(e) => Reply::Failed(format!("extd unreachable at {}: {e}", base_url())),
+        Ok(response) if response.ok => Reply::Renamed { from, to },
+        Ok(response) if response.status == 409 => Reply::Failed(format!("{to} already exists")),
+        Ok(response) if response.status == 400 => {
+            Reply::Failed(format!("{to} is not a usable name"))
+        }
+        Ok(response) => Reply::Failed(format!("extd refused the rename: {}", response.status)),
+    }
+}
+
+// Enter renames, escape leaves the name as it was.
+fn commit(
+    keys: Res<ButtonInput<KeyCode>>,
+    fields: Query<&EditableText, With<RenameField>>,
+    pending: Res<Pending>,
+    mut renaming: ResMut<Renaming>,
+) {
+    let Some(from) = renaming.0.clone() else {
+        return;
+    };
+    if keys.just_pressed(KeyCode::Escape) {
+        renaming.0 = None;
+        return;
+    }
+    if !keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter]) {
+        return;
+    }
+    let Ok(field) = fields.single() else {
+        return;
+    };
+    let to = field.value().to_string().trim().to_owned();
+    renaming.0 = None;
+    if !to.is_empty() && to != from {
+        rename(&pending, from, to);
+    }
+}
+
+// The first `untitled` nobody has taken.
 fn untitled(ids: &[String]) -> String {
     let mut name = "untitled".to_owned();
     let mut n = 1;
@@ -144,6 +214,11 @@ fn receive(
             // Made, so opened: the list it is missing from is refreshed by the
             // switch itself.
             Reply::Created(id) => space.0 = Some(id),
+            Reply::Renamed { from, to } => {
+                spaces.0.retain(|id| *id != from);
+                spaces.0.push(to);
+                spaces.0.sort();
+            }
             Reply::Failed(message) => {
                 error!("{message}");
                 notice.0 = Some(message);
@@ -156,47 +231,91 @@ fn draw(
     mut commands: Commands,
     space: Res<Space>,
     spaces: Res<Spaces>,
+    menu: Res<Menu>,
+    renaming: Res<Renaming>,
     existing: Query<Entity, With<Chrome>>,
 ) {
     for entity in &existing {
         commands.entity(entity).despawn();
     }
 
-    // A board on screen gets the way back to the list, and nothing more.
-    if space.0.is_some() {
+    // A board on screen gets its name and the way back to the list.
+    if let Some(id) = space.id() {
+        commands.spawn(title(id));
         commands.spawn(chip()).with_children(|parent| {
             button(parent, Hit::Back, "\u{2190} spaces");
         });
         return;
     }
 
-    commands.spawn(screen()).with_children(|parent| {
-        parent.spawn((
-            Text::new("spaces"),
-            TextFont::from_font_size(20.0),
-            TextColor(FG),
-        ));
-        parent.spawn(grid()).with_children(|parent| {
-            for id in &spaces.0 {
-                tile(parent, Hit::Open(id.clone()), id);
-            }
-            tile(parent, Hit::New, "+ new space");
+    if let Some((id, at)) = &menu.0 {
+        commands.spawn(menu_at(*at)).with_children(|parent| {
+            button(parent, Hit::Rename(id.clone()), "rename");
         });
-    });
+    }
+
+    commands
+        .spawn(screen())
+        .observe(dismiss)
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("spaces"),
+                TextFont::from_font_size(20.0),
+                TextColor(FG),
+            ));
+            parent.spawn(grid()).with_children(|parent| {
+                for id in &spaces.0 {
+                    let editing = renaming.0.as_ref() == Some(id);
+                    tile(parent, Hit::Open(id.clone()), id, editing);
+                }
+                tile(parent, Hit::New, "+ new space", false);
+            });
+        });
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
 fn pick(
-    press: On<Pointer<Press>>,
+    mut press: On<Pointer<Press>>,
     hits: Query<&Hit>,
     pending: Res<Pending>,
     spaces: Res<Spaces>,
     mut space: ResMut<Space>,
+    mut menu: ResMut<Menu>,
+    mut renaming: ResMut<Renaming>,
 ) {
-    match hits.get(press.entity) {
-        Ok(Hit::Open(id)) => space.0 = Some(id.clone()),
-        Ok(Hit::Back) => space.0 = None,
-        Ok(Hit::New) => create(&pending, untitled(&spaces.0)),
-        Err(_) => {}
+    // The screen behind the tile reads a press as a click away.
+    press.propagate(false);
+    let Ok(hit) = hits.get(press.entity) else {
+        return;
+    };
+    if press.button == PointerButton::Secondary {
+        if let Hit::Open(id) = hit {
+            menu.0 = Some((id.clone(), press.pointer_location.position));
+        }
+        return;
+    }
+    // Conditional, or a press inside the field redraws it out from under the caret.
+    if menu.0.is_some() {
+        menu.0 = None;
+    }
+    match hit {
+        Hit::Open(id) if renaming.0.as_ref() == Some(id) => {}
+        Hit::Open(id) => space.0 = Some(id.clone()),
+        Hit::Back => space.0 = None,
+        Hit::New => create(&pending, untitled(&spaces.0)),
+        Hit::Rename(id) => renaming.0 = Some(id.clone()),
+    }
+}
+
+fn dismiss(_: On<Pointer<Press>>, mut menu: ResMut<Menu>, mut renaming: ResMut<Renaming>) {
+    if menu.0.is_some() {
+        menu.0 = None;
+    }
+    if renaming.0.is_some() {
+        renaming.0 = None;
     }
 }
 
@@ -261,32 +380,82 @@ fn chip() -> impl Bundle {
     )
 }
 
-fn tile(parent: &mut ChildSpawnerCommands, hit: Hit, label: &str) {
+fn title(id: &str) -> impl Bundle {
+    (
+        Chrome,
+        GlobalZIndex(Z),
+        Text::new(id.to_owned()),
+        TextFont::from_font_size(14.0),
+        TextColor(FG),
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(8.0),
+            top: px(CHIP_TOP),
+            ..default()
+        },
+    )
+}
+
+fn menu_at(at: Vec2) -> impl Bundle {
+    (
+        Chrome,
+        PanelRoot,
+        GlobalZIndex(Z + 1),
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(at.x),
+            top: px(at.y),
+            padding: UiRect::all(px(4.0)),
+            border: UiRect::all(px(1.0)),
+            border_radius: BorderRadius::all(px(6.0)),
+            ..default()
+        },
+        BackgroundColor(DARK),
+        BorderColor::all(EDGE),
+    )
+}
+
+fn tile(parent: &mut ChildSpawnerCommands, hit: Hit, label: &str, editing: bool) {
     let new = matches!(hit, Hit::New);
-    parent
-        .spawn((
-            hit,
+    let mut tile = parent.spawn((
+        hit,
+        Node {
+            width: px(TILE.x),
+            height: px(TILE.y),
+            padding: UiRect::all(px(10.0)),
+            border: UiRect::all(px(1.0)),
+            border_radius: BorderRadius::all(px(8.0)),
+            align_items: AlignItems::FlexEnd,
+            ..default()
+        },
+        BackgroundColor(TILE_BG),
+        BorderColor::all(EDGE),
+        Pickable::default(),
+    ));
+    if editing {
+        tile.with_child((
+            RenameField,
             Node {
-                width: px(TILE.x),
-                height: px(TILE.y),
-                padding: UiRect::all(px(10.0)),
-                border: UiRect::all(px(1.0)),
-                border_radius: BorderRadius::all(px(8.0)),
-                align_items: AlignItems::FlexEnd,
+                width: percent(100.0),
                 ..default()
             },
-            BackgroundColor(TILE_BG),
-            BorderColor::all(EDGE),
-            Pickable::default(),
-            children![(
-                Text::new(label.to_owned()),
-                TextFont::from_font_size(13.0),
-                TextColor(if new { LABEL } else { FG }),
-            )],
-        ))
-        .observe(pick)
-        .observe(highlight)
-        .observe(unhighlight);
+            EditableText::new(label),
+            TextFont::from_font_size(13.0),
+            TextColor(FG),
+            TextCursorStyle {
+                color: FG,
+                ..default()
+            },
+            AutoFocus,
+        ));
+    } else {
+        tile.with_child((
+            Text::new(label.to_owned()),
+            TextFont::from_font_size(13.0),
+            TextColor(if new { LABEL } else { FG }),
+        ));
+    }
+    tile.observe(pick).observe(highlight).observe(unhighlight);
 }
 
 fn button(parent: &mut ChildSpawnerCommands, hit: Hit, label: &str) {
@@ -387,6 +556,14 @@ mod tests {
         assert!(matches!(
             created("fresh".to_owned(), response(409, "")),
             Reply::Failed(_)
+        ));
+        assert!(matches!(
+            renamed("a".to_owned(), "b".to_owned(), response(204, "")),
+            Reply::Renamed { from, to } if from == "a" && to == "b"
+        ));
+        assert!(matches!(
+            renamed("a".to_owned(), "b".to_owned(), response(409, "")),
+            Reply::Failed(message) if message == "b already exists"
         ));
     }
 }

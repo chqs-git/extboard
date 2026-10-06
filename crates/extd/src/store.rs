@@ -25,6 +25,9 @@ pub enum StoreError {
     #[error("no space named {0}")]
     NotFound(String),
 
+    #[error("{0} already exists")]
+    Exists(String),
+
     #[error("{id} is not valid JSONCanvas: {source}")]
     Parse {
         id: String,
@@ -103,6 +106,34 @@ impl Store {
         let dir = self.dir.join(sub);
         fs::create_dir_all(&dir)?;
         Ok(format!("{sub}/{}", write_new(&dir, name.as_ref(), bytes)?))
+    }
+
+    // Under both locks, taken in id order so two renames crossing each other
+    // cannot deadlock. `fs::rename` clobbers, so the target is checked first.
+    pub async fn rename(&self, from: &str, to: &str) -> Result<()> {
+        let (source, target) = (self.space(from)?, self.space(to)?);
+        if from == to {
+            return Ok(());
+        }
+        let (first, second) = if from < to {
+            (&source, &target)
+        } else {
+            (&target, &source)
+        };
+        let (first, second) = (first.write().await, second.write().await);
+        let (source, target) = if from < to {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        if !source.exists() {
+            return Err(StoreError::NotFound(from.to_string()));
+        }
+        if target.exists() {
+            return Err(StoreError::Exists(to.to_string()));
+        }
+        fs::rename(&source.path, &target.path)?;
+        Ok(())
     }
 
     pub fn at(dir: PathBuf) -> Self {
@@ -279,6 +310,34 @@ mod tests {
         );
         assert!(rev(&canvas) == one.1 || rev(&canvas) == two.1);
 
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rename_moves_the_file_and_never_clobbers() {
+        let dir = std::env::temp_dir().join("extboard-rename-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for id in ["a", "b"] {
+            fs::write(dir.join(format!("{id}.canvas")), id).unwrap();
+        }
+        let store = Store::at(dir.clone());
+
+        store.rename("a", "c").await.unwrap();
+        assert_eq!(store.list().unwrap(), ["b", "c"]);
+        assert!(matches!(
+            store.rename("c", "b").await,
+            Err(StoreError::Exists(_))
+        ));
+        assert_eq!(fs::read_to_string(dir.join("b.canvas")).unwrap(), "b");
+        assert!(matches!(
+            store.rename("a", "d").await,
+            Err(StoreError::NotFound(_))
+        ));
+        assert!(matches!(
+            store.rename("c", "../x").await,
+            Err(StoreError::BadId(_))
+        ));
         fs::remove_dir_all(&dir).unwrap();
     }
 
