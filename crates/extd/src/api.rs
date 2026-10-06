@@ -65,6 +65,7 @@ fn router(state: AppState, dir: PathBuf) -> Router {
         .route("/api/spaces/{id}", get(get_space))
         .route("/api/spaces/{id}", put(put_space))
         .route("/api/spaces/{id}", post(create_space))
+        .route("/api/spaces/{id}/rename", post(rename_space))
         .route("/api/events", get(events))
         .route(
             "/api/files/{name}",
@@ -121,6 +122,17 @@ async fn create_space(
     let saved = guard.save(&Canvas::default())?;
     app.events.emit(&id, &saved);
     Ok((StatusCode::CREATED, [(ETAG, format!("\"{saved}\""))]).into_response())
+}
+
+// The body is the new id. Nothing inside the file changes, so no event: a link
+// node elsewhere pointing at the old id is left dangling.
+async fn rename_space(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    to: String,
+) -> Result<StatusCode, StoreError> {
+    app.store.rename(&id, to.trim()).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // A dropped photo off a phone, with room to spare.
@@ -215,6 +227,7 @@ impl IntoResponse for StoreError {
             // missing resource.
             StoreError::BadId(_) => StatusCode::BAD_REQUEST,
             StoreError::NotFound(_) => StatusCode::NOT_FOUND,
+            StoreError::Exists(_) => StatusCode::CONFLICT,
             // A corrupt file or an unreadable directory is ours.
             StoreError::Parse { .. } | StoreError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
