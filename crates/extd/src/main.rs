@@ -21,6 +21,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         cli::Command::Project { file, selection } => cli::project(&file, &selection)?,
         cli::Command::Unproject { file } => cli::unproject(&file)?,
         cli::Command::Fmt { file, check } => cli::fmt(&file, check)?,
+        cli::Command::Gc { check } => cli::gc(check)?,
         cli::Command::Pull {
             file,
             space,

@@ -1,5 +1,5 @@
 use crate::events::{Events, events, watch};
-use crate::store::{Store, StoreError};
+use crate::store::{Store, StoreError, secs};
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::header::{CONTENT_TYPE, ETAG, IF_MATCH, IF_NONE_MATCH};
@@ -28,6 +28,7 @@ pub async fn serve(port: u16, dist: PathBuf) -> Result<(), Box<dyn std::error::E
         events: Events::new(),
     });
     let _watcher = watch(state.clone())?;
+    tokio::spawn(collect_garbage(state.clone()));
 
     if !dist.join("index.html").is_file() {
         eprintln!(
@@ -44,6 +45,24 @@ pub async fn serve(port: u16, dist: PathBuf) -> Result<(), Box<dyn std::error::E
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+// Daily, not every GRACE: the grace decides what is kept, this only how soon
+// after it the rest goes.
+async fn collect_garbage(app: AppState) {
+    let mut daily = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+    loop {
+        daily.tick().await;
+        let app = app.clone();
+        let now = secs(std::time::SystemTime::now());
+        match tokio::task::spawn_blocking(move || app.store.collect(now)).await {
+            Ok(Ok(moved)) => moved
+                .iter()
+                .for_each(|path| println!("trashed {}", path.display())),
+            Ok(Err(e)) => eprintln!("garbage collection stopped: {e}"),
+            Err(e) => eprintln!("garbage collection panicked: {e}"),
+        }
+    }
 }
 
 // The API plus the bundle. Split from `router` so the tests can drive the API
