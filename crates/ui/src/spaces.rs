@@ -3,16 +3,21 @@ use bevy::input_focus::{AutoFocus, InputFocus};
 use bevy::prelude::*;
 use bevy::text::{EditableText, TextCursorStyle};
 use extboard_core::{Canvas, NodeKind, space_path};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::client::{Document, Notice, Space, base_url, space_url};
+use crate::node::{body_color, outline_color};
 use crate::select::PanelRoot;
-use crate::theme::DARK;
+use crate::theme::{DARK, Theme};
 
 // Over every panel and over the selection band at 1000: this is a screen, not
 // a panel on the board.
 const Z: i32 = 2_000;
-const TILE: Vec2 = Vec2::new(180.0, 96.0);
+const TILE: f32 = 200.0;
+const COLUMNS: u16 = 4;
+const RADIUS: f32 = 8.0;
+const BORDER: f32 = 2.0;
 const GAP: f32 = 12.0;
 const PAD: f32 = 24.0;
 // Clear of the theme panel below it, which starts at 30.
@@ -21,6 +26,15 @@ const CHIP_TOP: f32 = 8.0;
 const TILE_BG: Color = Color::srgb(0.16, 0.17, 0.21);
 const HOVER: Color = Color::srgb(0.22, 0.24, 0.3);
 const EDGE: Color = Color::srgb(0.25, 0.27, 0.32);
+const EDGE_HOVER: Color = Color::srgb(0.45, 0.5, 0.6);
+// Under a tile's name, so it reads over the map.
+const SHADE: Color = Color::srgba(0.0, 0.0, 0.0, 0.6);
+// Canvas units to tile pixels, at most zoomed out and at most zoomed in: past
+// the first a big board is cropped to its middle, past the second one note
+// would fill the tile.
+const MAP_SCALE: (f32, f32) = (0.02, 0.25);
+// Room around the content inside the tile.
+const MAP_FILL: f32 = 0.85;
 const FG: Color = Color::srgb(0.86, 0.88, 0.92);
 const LABEL: Color = Color::srgb(0.45, 0.5, 0.55);
 
@@ -29,6 +43,7 @@ pub struct SpacesPlugin;
 #[derive(Debug)]
 enum Reply {
     Listed(Vec<String>),
+    Fetched(String, Canvas),
     Created(String),
     Inner {
         parent: String,
@@ -67,6 +82,10 @@ struct Chrome;
 #[derive(Resource, Default)]
 struct Menu(Option<(String, Vec2)>);
 
+// Each listed space's canvas, which its tile draws in small.
+#[derive(Resource, Default)]
+struct Maps(HashMap<String, Canvas>);
+
 // The space whose tile is a text field for now.
 #[derive(Resource, Default)]
 struct Renaming(Option<String>);
@@ -101,6 +120,7 @@ enum Hit {
 impl Plugin for SpacesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Spaces>()
+            .init_resource::<Maps>()
             .init_resource::<Pending>()
             .init_resource::<Trail>()
             .init_resource::<Menu>()
@@ -121,6 +141,7 @@ impl Plugin for SpacesPlugin {
                             .or_else(resource_changed::<Trail>)
                             .or_else(resource_changed::<Menu>)
                             .or_else(resource_changed::<Renaming>)
+                            .or_else(resource_changed::<Maps>)
                             .or_else(resource_changed::<Naming>),
                     ),
                 )
@@ -156,6 +177,20 @@ fn only_link(text: &str) -> Option<String> {
         }
     }
     (links == 1).then(|| space_path(&dest?).map(str::to_owned))?
+}
+
+fn fetch(pending: &Pending, id: &str) {
+    let (inbox, id) = (pending.0.clone(), id.to_owned());
+    ehttp::fetch(ehttp::Request::get(space_url(&id)), move |result| {
+        // A map is a nicety: a space that will not load is a plain tile.
+        let canvas = result
+            .ok()
+            .filter(|response| response.ok)
+            .and_then(|response| serde_json::from_slice(&response.bytes).ok());
+        if let Some(canvas) = canvas {
+            lock(&inbox).push(Reply::Fetched(id, canvas));
+        }
+    });
 }
 
 fn refresh(pending: Res<Pending>, space: Res<Space>) {
@@ -346,6 +381,10 @@ pub fn typing(focus: Res<InputFocus>, fields: Query<(), With<NameField>>) -> boo
     focus.get().is_some_and(|entity| fields.contains(entity))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
 fn receive(
     pending: Res<Pending>,
     frames: Res<FrameCount>,
@@ -354,11 +393,13 @@ fn receive(
     mut trail: ResMut<Trail>,
     mut notice: ResMut<Notice>,
     mut document: Option<ResMut<Document>>,
+    mut maps: ResMut<Maps>,
 ) {
     let batch = std::mem::take(&mut *lock(&pending.0));
     for reply in batch {
         match reply {
             Reply::Listed(ids) => {
+                ids.iter().for_each(|id| fetch(&pending, id));
                 spaces.0 = ids;
                 // A list that arrives clears the one that did not.
                 if notice.0.is_some() {
@@ -382,6 +423,9 @@ fn receive(
                     crate::edit::added(&mut document.0, frames.0, rect, NodeKind::Text { text });
                 }
             }
+            Reply::Fetched(id, canvas) => {
+                maps.0.insert(id, canvas);
+            }
             // A late reply for a space already left is dropped.
             Reply::Path(id, path) => {
                 if space.id() == Some(&id) {
@@ -389,6 +433,9 @@ fn receive(
                 }
             }
             Reply::Renamed { from, to } => {
+                if let Some(canvas) = maps.0.remove(&from) {
+                    maps.0.insert(to.clone(), canvas);
+                }
                 spaces.0.retain(|id| *id != from);
                 spaces.0.push(to);
                 spaces.0.sort();
@@ -413,6 +460,7 @@ fn draw(
     naming: Res<Naming>,
     menu: Res<Menu>,
     renaming: Res<Renaming>,
+    maps: Res<Maps>,
     existing: Query<Entity, With<Chrome>>,
 ) {
     for entity in &existing {
@@ -450,7 +498,7 @@ fn draw(
             commands.spawn(menu_at(draft.screen)).with_child((
                 NameField,
                 Node {
-                    width: px(TILE.x),
+                    width: px(TILE),
                     padding: UiRect::axes(px(6.0), px(4.0)),
                     ..default()
                 },
@@ -485,9 +533,9 @@ fn draw(
             parent.spawn(grid()).with_children(|parent| {
                 for id in &spaces.0 {
                     let editing = renaming.0.as_ref() == Some(id);
-                    tile(parent, Hit::Open(id.clone()), id, editing);
+                    tile(parent, Hit::Open(id.clone()), id, editing, maps.0.get(id));
                 }
-                tile(parent, Hit::New, "+ new space", false);
+                tile(parent, Hit::New, "+ new space", false, None);
             });
         });
 }
@@ -538,15 +586,28 @@ fn dismiss(_: On<Pointer<Press>>, mut menu: ResMut<Menu>, mut renaming: ResMut<R
     }
 }
 
-fn highlight(over: On<Pointer<Over>>, mut hits: Query<&mut BackgroundColor, With<Hit>>) {
-    if let Ok(mut color) = hits.get_mut(over.entity) {
+// The border too: a tile's map covers its background.
+fn highlight(
+    over: On<Pointer<Over>>,
+    mut hits: Query<(&mut BackgroundColor, Option<&mut BorderColor>), With<Hit>>,
+) {
+    if let Ok((mut color, border)) = hits.get_mut(over.entity) {
         color.0 = HOVER;
+        if let Some(mut border) = border {
+            *border = BorderColor::all(EDGE_HOVER);
+        }
     }
 }
 
-fn unhighlight(out: On<Pointer<Out>>, mut hits: Query<&mut BackgroundColor, With<Hit>>) {
-    if let Ok(mut color) = hits.get_mut(out.entity) {
+fn unhighlight(
+    out: On<Pointer<Out>>,
+    mut hits: Query<(&mut BackgroundColor, Option<&mut BorderColor>), With<Hit>>,
+) {
+    if let Ok((mut color, border)) = hits.get_mut(out.entity) {
         color.0 = TILE_BG;
+        if let Some(mut border) = border {
+            *border = BorderColor::all(EDGE);
+        }
     }
 }
 
@@ -577,8 +638,9 @@ fn screen() -> impl Bundle {
 fn grid() -> impl Bundle {
     Node {
         width: percent(100.0),
-        flex_wrap: FlexWrap::Wrap,
-        align_content: AlignContent::FlexStart,
+        display: Display::Grid,
+        grid_template_columns: RepeatedGridTrack::px(COLUMNS, TILE),
+        justify_content: JustifyContent::Center,
         row_gap: px(GAP),
         column_gap: px(GAP),
         ..default()
@@ -660,30 +722,43 @@ fn menu_at(at: Vec2) -> impl Bundle {
     )
 }
 
-fn tile(parent: &mut ChildSpawnerCommands, hit: Hit, label: &str, editing: bool) {
+fn tile(
+    parent: &mut ChildSpawnerCommands,
+    hit: Hit,
+    label: &str,
+    editing: bool,
+    map: Option<&Canvas>,
+) {
     let new = matches!(hit, Hit::New);
     let mut tile = parent.spawn((
         hit,
         Node {
-            width: px(TILE.x),
-            height: px(TILE.y),
-            padding: UiRect::all(px(10.0)),
-            border: UiRect::all(px(1.0)),
-            border_radius: BorderRadius::all(px(8.0)),
+            width: px(TILE),
+            height: px(TILE),
+            border: UiRect::all(px(BORDER)),
+            border_radius: BorderRadius::all(px(RADIUS)),
             align_items: AlignItems::FlexEnd,
+            overflow: Overflow::clip(),
             ..default()
         },
         BackgroundColor(TILE_BG),
         BorderColor::all(EDGE),
         Pickable::default(),
     ));
+    if let Some(canvas) = map {
+        tile.with_children(|parent| draw_map(parent, canvas));
+    }
+    let name = Node {
+        width: percent(100.0),
+        padding: UiRect::axes(px(8.0), px(6.0)),
+        border_radius: BorderRadius::bottom(px(RADIUS - BORDER)),
+        ..default()
+    };
     if editing {
         tile.with_child((
             RenameField,
-            Node {
-                width: percent(100.0),
-                ..default()
-            },
+            name,
+            BackgroundColor(SHADE),
             EditableText::new(label),
             TextFont::from_font_size(13.0),
             TextColor(FG),
@@ -695,12 +770,81 @@ fn tile(parent: &mut ChildSpawnerCommands, hit: Hit, label: &str, editing: bool)
         ));
     } else {
         tile.with_child((
-            Text::new(label.to_owned()),
-            TextFont::from_font_size(13.0),
-            TextColor(if new { LABEL } else { FG }),
+            name,
+            BackgroundColor(if new { Color::NONE } else { SHADE }),
+            Pickable::IGNORE,
+            children![(
+                Text::new(label.to_owned()),
+                TextFont::from_font_size(13.0),
+                TextColor(if new { LABEL } else { FG }),
+                Pickable::IGNORE,
+            )],
         ));
     }
     tile.observe(pick).observe(highlight).observe(unhighlight);
+}
+
+// The board in small, in its own palette: every node a box where it sits.
+fn draw_map(parent: &mut ChildSpawnerCommands, canvas: &Canvas) {
+    let theme = Theme::of_canvas(canvas);
+    let boxes: Vec<Rect> = canvas.nodes.iter().map(rect).collect();
+    let Some(place) = boxes
+        .iter()
+        .copied()
+        .reduce(|all, one| all.union(one))
+        .map(|all| fit(all, TILE))
+    else {
+        return;
+    };
+    parent
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100.0),
+                height: percent(100.0),
+                // The clip is square: rounded to sit inside the tile's border.
+                border_radius: BorderRadius::all(px(RADIUS - BORDER)),
+                ..default()
+            },
+            BackgroundColor(theme.color(extboard_core::BACKGROUND)),
+            Pickable::IGNORE,
+        ))
+        .with_children(|parent| {
+            for (node, at) in canvas.nodes.iter().zip(boxes) {
+                let at = place(at);
+                parent.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(at.min.x),
+                        top: px(at.min.y),
+                        width: px(at.width().max(1.0)),
+                        height: px(at.height().max(1.0)),
+                        border: UiRect::all(px(1.0)),
+                        border_radius: BorderRadius::all(px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(body_color(&theme, node)),
+                    BorderColor::all(outline_color(&theme, node)),
+                    Pickable::IGNORE,
+                ));
+            }
+        });
+}
+
+fn rect(node: &extboard_core::Node) -> Rect {
+    let at = Vec2::new(node.x as f32, node.y as f32);
+    Rect::from_corners(at, at + Vec2::new(node.width as f32, node.height as f32))
+}
+
+// Canvas to tile pixels: everything, centred, within `MAP_SCALE`.
+fn fit(all: Rect, side: f32) -> impl Fn(Rect) -> Rect {
+    let scale =
+        (side * MAP_FILL / all.size().max_element().max(1.0)).clamp(MAP_SCALE.0, MAP_SCALE.1);
+    let middle = all.center();
+    move |one| {
+        let at = |point: Vec2| (point - middle) * scale + side / 2.0;
+        Rect::from_corners(at(one.min), at(one.max))
+    }
 }
 
 fn button(parent: &mut ChildSpawnerCommands, hit: Hit, label: &str) {
@@ -776,6 +920,21 @@ mod tests {
             assert_eq!(linked(&text(other), "n2"), None, "{other}");
         }
         assert_eq!(linked(&canvas("/s/trip"), "gone"), None);
+    }
+
+    #[test]
+    fn a_map_fits_the_board_in_the_tile_but_only_so_far() {
+        let board = Rect::new(-500.0, 0.0, 500.0, 200.0);
+        let place = fit(board, 100.0);
+        let placed = place(board);
+        assert!((placed.width() - 100.0 * MAP_FILL).abs() < 1e-3);
+        assert!((placed.center() - Vec2::splat(50.0)).length() < 1e-3);
+        // One small note is not blown up to fill the tile.
+        let note = Rect::new(0.0, 0.0, 40.0, 40.0);
+        assert_eq!(fit(note, 100.0)(note).width(), 40.0 * MAP_SCALE.1);
+        // A huge board is cropped round its middle, not shrunk to dust.
+        let huge = Rect::new(0.0, 0.0, 1e6, 10.0);
+        assert!((fit(huge, 100.0)(huge).height() - 10.0 * MAP_SCALE.0).abs() < 1e-3);
     }
 
     #[test]
