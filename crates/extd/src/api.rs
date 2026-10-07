@@ -7,7 +7,7 @@ use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use extboard_core::{Canvas, is_font, is_image, rev, validate};
+use extboard_core::{Canvas, is_font, is_image, object_mut, rev, validate};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -62,10 +62,12 @@ fn router(state: AppState, dir: PathBuf) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/spaces", get(list_spaces))
+        .route("/api/spaces", post(create_untitled))
         .route("/api/spaces/{id}", get(get_space))
         .route("/api/spaces/{id}", put(put_space))
         .route("/api/spaces/{id}", post(create_space))
         .route("/api/spaces/{id}/rename", post(rename_space))
+        .route("/api/spaces/{id}/path", get(space_path))
         .route("/api/events", get(events))
         .route(
             "/api/files/{name}",
@@ -82,8 +84,87 @@ async fn health(State(app): State<AppState>) -> Result<&'static str, StatusCode>
     }
 }
 
+// Top-level spaces only: one made inside another is reached through its door.
 async fn list_spaces(State(app): State<AppState>) -> Result<Json<Vec<String>>, StoreError> {
-    Ok(Json(app.store.list()?))
+    let mut top = Vec::new();
+    for id in app.store.list()? {
+        let canvas = app.store.space(&id)?.read().await.load();
+        if canvas.is_ok_and(|canvas| canvas.parent().is_none()) {
+            top.push(id);
+        }
+    }
+    Ok(Json(top))
+}
+
+// The server names it, because only the server sees the spaces the list hides.
+// The reply is the new id.
+async fn create_untitled(State(app): State<AppState>) -> Result<Response, StoreError> {
+    for n in 1.. {
+        let id = match n {
+            1 => "untitled".to_owned(),
+            n => format!("untitled-{n}"),
+        };
+        let space = app.store.space(&id)?;
+        let mut guard = space.write().await;
+        if guard.exists() {
+            continue;
+        }
+        let saved = guard.save(&Canvas::default())?;
+        app.events.emit(&id, &saved);
+        return Ok((StatusCode::CREATED, [(ETAG, format!("\"{saved}\""))], id).into_response());
+    }
+    unreachable!("1.. never runs out")
+}
+
+// An empty canvas, inside `parent` unless that is empty, starting out in the
+// parent's theme, fonts and saved themes. A parent that is not there is refused.
+async fn child_of(app: &App, parent: &str) -> Result<Canvas, StoreError> {
+    let mut canvas = Canvas::default();
+    if parent.is_empty() {
+        return Ok(canvas);
+    }
+    let from = app.store.space(parent)?.read().await.load()?;
+    if let Some(theme) = from.extra.get("theme") {
+        canvas.extra.insert("theme".into(), theme.clone());
+    }
+    if let Some(themes) = from
+        .extra
+        .get("extboard")
+        .and_then(|extboard| extboard.get("themes"))
+    {
+        object_mut(&mut canvas.extra, "extboard").insert("themes".into(), themes.clone());
+    }
+    canvas.set_parent(parent);
+    Ok(canvas)
+}
+
+// Root first, ending at `id`. A parent that is gone ends the walk; a loop is
+// no hierarchy at all, so it is the space alone.
+async fn space_path(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<String>>, StoreError> {
+    let mut path = vec![id.clone()];
+    let mut parent = app
+        .store
+        .space(&id)?
+        .read()
+        .await
+        .load()?
+        .parent()
+        .map(str::to_owned);
+    while let Some(next) = parent {
+        if path.contains(&next) {
+            return Ok(Json(vec![id]));
+        }
+        let Ok(canvas) = app.store.space(&next)?.read().await.load() else {
+            break;
+        };
+        parent = canvas.parent().map(str::to_owned);
+        path.push(next);
+    }
+    path.reverse();
+    Ok(Json(path))
 }
 
 async fn get_space(
@@ -108,30 +189,52 @@ async fn get_space(
 }
 
 // A new space is an empty canvas. Creation is its own verb so a PUT can stay a
-// compare-and-swap over a document that exists.
+// compare-and-swap over a document that exists. The body is the parent, if any,
+// and a child's id is `<parent>_<name>`, so two parents can each have a `notes`.
+// The reply is the id.
 async fn create_space(
     State(app): State<AppState>,
-    Path(id): Path<String>,
+    Path(name): Path<String>,
+    parent: String,
 ) -> Result<Response, StoreError> {
+    let parent = parent.trim();
+    let canvas = child_of(&app, parent).await?;
+    let id = match parent {
+        "" => name,
+        parent => format!("{parent}_{name}"),
+    };
     let space = app.store.space(&id)?;
     let mut guard = space.write().await;
     if guard.exists() {
         return Ok(StatusCode::CONFLICT.into_response());
     }
 
-    let saved = guard.save(&Canvas::default())?;
+    let saved = guard.save(&canvas)?;
     app.events.emit(&id, &saved);
-    Ok((StatusCode::CREATED, [(ETAG, format!("\"{saved}\""))]).into_response())
+    Ok((StatusCode::CREATED, [(ETAG, format!("\"{saved}\""))], id).into_response())
 }
 
-// The body is the new id. Nothing inside the file changes, so no event: a link
-// node elsewhere pointing at the old id is left dangling.
+// The body is the new id. A link node elsewhere pointing at the old id is left
+// dangling, but the spaces made inside it follow it to its new name.
 async fn rename_space(
     State(app): State<AppState>,
     Path(id): Path<String>,
     to: String,
 ) -> Result<StatusCode, StoreError> {
-    app.store.rename(&id, to.trim()).await?;
+    let to = to.trim();
+    app.store.rename(&id, to).await?;
+    for child in app.store.list()? {
+        let space = app.store.space(&child)?;
+        let mut guard = space.write().await;
+        let Ok(mut canvas) = guard.load() else {
+            continue;
+        };
+        if canvas.parent() == Some(id.as_str()) {
+            canvas.set_parent(to);
+            let saved = guard.save(&canvas)?;
+            app.events.emit(&child, &saved);
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -393,6 +496,98 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body, r#"["a","b"]"#);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_inner_space_is_off_the_list_and_on_its_parents_path() {
+        let dir = std::env::temp_dir().join("extboard-inner-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("untitled.canvas"), "{}").unwrap();
+        let app = || router(state(dir.clone()), dir.clone());
+        let call = async |request: Request<Body>| {
+            let response = app().oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, String::from_utf8(bytes.to_vec()).unwrap())
+        };
+        let post = |path: &str, body: &str| {
+            Request::post(path)
+                .body(Body::from(body.to_owned()))
+                .unwrap()
+        };
+        let get = |path: &str| Request::get(path).body(Body::empty()).unwrap();
+
+        // The free `untitled` is the server's to find.
+        assert_eq!(
+            call(post("/api/spaces", "")).await,
+            (StatusCode::CREATED, "untitled-2".into())
+        );
+
+        // A child's id carries its parent's, so the same name twice is two spaces.
+        assert_eq!(
+            call(post("/api/spaces/notes", "untitled")).await,
+            (StatusCode::CREATED, "untitled_notes".into())
+        );
+        assert_eq!(
+            call(post("/api/spaces/notes", "untitled-2")).await.1,
+            "untitled-2_notes"
+        );
+        assert_eq!(
+            call(post("/api/spaces/notes", "untitled")).await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            call(post("/api/spaces/notes", "gone")).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(post("/api/spaces/deep", "untitled_notes")).await.1,
+            "untitled_notes_deep"
+        );
+
+        // A child starts in its parent's theme and fonts.
+        let themed = r##"{"theme":{"colors":["#111111"],"fonts":["fonts/a.ttf"]},"extboard":{"themes":{"dusk":["#222222"]}}}"##;
+        std::fs::write(dir.join("dusk.canvas"), themed).unwrap();
+        call(post("/api/spaces/attic", "dusk")).await;
+        let attic: Canvas =
+            serde_json::from_str(&call(get("/api/spaces/dusk_attic")).await.1).unwrap();
+        let parent: Canvas = serde_json::from_str(themed).unwrap();
+        assert_eq!(attic.extra["theme"], parent.extra["theme"]);
+        assert_eq!(
+            attic.extra["extboard"]["themes"],
+            parent.extra["extboard"]["themes"]
+        );
+        assert_eq!(attic.parent(), Some("dusk"));
+
+        assert_eq!(
+            call(get("/api/spaces")).await.1,
+            r#"["dusk","untitled","untitled-2"]"#
+        );
+        assert_eq!(
+            call(get("/api/spaces/untitled_notes_deep/path")).await.1,
+            r#"["untitled","untitled_notes","untitled_notes_deep"]"#
+        );
+
+        // The children follow a rename.
+        call(post("/api/spaces/untitled_notes/rename", "kitchen")).await;
+        assert_eq!(
+            call(get("/api/spaces/untitled_notes_deep/path")).await.1,
+            r#"["untitled","kitchen","untitled_notes_deep"]"#
+        );
+
+        // A loop is no hierarchy at all.
+        let mut root = Canvas::default();
+        root.set_parent("untitled_notes_deep");
+        std::fs::write(dir.join("untitled.canvas"), root.to_pretty_string()).unwrap();
+        assert_eq!(
+            call(get("/api/spaces/kitchen/path")).await.1,
+            r#"["kitchen"]"#
+        );
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

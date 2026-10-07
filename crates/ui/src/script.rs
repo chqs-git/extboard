@@ -212,6 +212,7 @@ impl Plugin for ScriptPlugin {
                     // take the paragraph being typed into one with it.
                     (click, tick)
                         .run_if(resource_exists::<Document>.and_then(not(crate::text::editing))),
+                    door_cursor.run_if(resource_exists::<Document>),
                 )
                     .chain(),
             )
@@ -747,13 +748,20 @@ fn click(
     if at.is_none_or(|at| at.distance(from) > SLOP_PX) {
         return;
     }
-    let door = at
-        .and_then(|at| links.under(&node, at))
-        .or_else(|| crate::spaces::linked(&document.0, &node));
-    if let Some(id) = door {
-        if space.id() != Some(id.as_str()) {
-            space.0 = Some(id);
+    let Some(at) = at else {
+        return;
+    };
+    let door = door(&links, &document.0, &node, at);
+    // Shift, so a plain click selects, moves or double-clicks into the text
+    // instead of leaving the board.
+    if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
+        if let Some(id) = door {
+            if space.id() != Some(id.as_str()) {
+                space.0 = Some(id);
+            }
+            return;
         }
+    } else if door.is_some() {
         return;
     }
     // Checked before the write, so an unscripted click is not a document change.
@@ -785,6 +793,77 @@ fn tick(
     // Drawn, never saved: `sync` reads this to tell a clock from an edit.
     ticked.wrote(&before, &after);
     document.set_changed();
+}
+
+// The space `node` leads to from `at`: a link inside its text, else
+// the node itself if it is a link to one.
+fn door(links: &crate::text::Links, canvas: &Canvas, node: &str, at: Vec2) -> Option<String> {
+    links
+        .under(node, at)
+        .or_else(|| crate::spaces::linked(canvas, node))
+}
+
+#[derive(Component)]
+struct DoorCursor;
+
+// Logical px, drawn from a 48px image so a 2x screen gets every pixel of it.
+const DOOR_SIZE: f32 = 24.0;
+
+// Over a door the pointer is the door. Drawn rather than a system cursor: winit
+// gives a custom cursor one image pixel per point, which a 2x screen blurs.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
+fn door_cursor(
+    mut commands: Commands,
+    buttons: Res<ButtonInput<MouseButton>>,
+    window: Single<(&Window, &mut bevy::window::CursorOptions)>,
+    camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    nodes: Query<(&NodeId, &Transform, &NodeRect)>,
+    links: crate::text::Links,
+    document: Res<Document>,
+    icons: Res<crate::icon::Icons>,
+    mut drawn: Query<(Entity, &mut Node), With<DoorCursor>>,
+) {
+    let (window, mut options) = window.into_inner();
+    // A held button is a drag, and a drag keeps the pointer it started with.
+    let at = window.cursor_position().filter(|&at| {
+        !buttons.pressed(MouseButton::Left)
+            && under(window, *camera, &nodes)
+                .is_some_and(|node| door(&links, &document.0, &node, at).is_some())
+    });
+    if options.visible != at.is_none() {
+        options.visible = at.is_none();
+    }
+    let Some(at) = at else {
+        for (entity, _) in &drawn {
+            commands.entity(entity).despawn();
+        }
+        return;
+    };
+    // Centred on the pointer: the door is where the click lands.
+    let (left, top) = (px(at.x - DOOR_SIZE / 2.0), px(at.y - DOOR_SIZE / 2.0));
+    if let Ok((_, mut node)) = drawn.single_mut() {
+        if node.left != left || node.top != top {
+            (node.left, node.top) = (left, top);
+        }
+        return;
+    }
+    commands.spawn((
+        DoorCursor,
+        ImageNode::new(icons.get("sensor_door")),
+        Node {
+            position_type: PositionType::Absolute,
+            left,
+            top,
+            width: px(DOOR_SIZE),
+            height: px(DOOR_SIZE),
+            ..default()
+        },
+        GlobalZIndex(i32::MAX),
+        Pickable::IGNORE,
+    ));
 }
 
 fn under(
