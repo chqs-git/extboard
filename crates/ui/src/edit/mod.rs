@@ -4,7 +4,7 @@ use bevy::window::{CursorIcon, SystemCursorIcon};
 use extboard_core::{Canvas, Edge as CanvasEdge, Node as CanvasNode, NodeKind, Side, fresh_id};
 
 use crate::client::Document;
-use crate::node::{NodeId, NodeKind as Kind, NodeRect, to_canvas};
+use crate::node::{NodeId, NodeKind as Kind, NodeRect, to_canvas, to_world};
 use crate::scene::{draw_arrow, segments};
 use crate::select::{Selected, bounds, cursor_world, pick};
 
@@ -37,8 +37,10 @@ const REACH_HOVER: f32 = 56.0;
 const REACH_DRAG: f32 = 224.0;
 
 mod drop;
+mod group;
 mod keys;
 
+pub use group::{in_group, ungrouped};
 pub use keys::duplicated;
 
 pub use keys::command;
@@ -50,11 +52,13 @@ enum Drag {
     Move {
         grab: Vec2,
         start: Vec<(Entity, Vec2)>,
+        members: group::Members,
     },
     Resize {
         entity: Entity,
         handle: IVec2,
         start: Rect,
+        members: group::Members,
     },
     Edge {
         from: Entity,
@@ -146,6 +150,13 @@ fn grab(
     let Projection::Orthographic(ortho) = projection else {
         return;
     };
+    // Once per press, not per frame: who is in which group as the gesture began.
+    let members = || {
+        document
+            .as_deref()
+            .map(|document| group::members(&document.0))
+            .unwrap_or_default()
+    };
 
     // An edge ends on the very anchor that starts a new one, so the circle keeps
     // the pixel it is drawn on and the arrowhead around it takes the rest: one
@@ -163,7 +174,9 @@ fn grab(
         return;
     }
 
+    // A group's size is its contents', never the hand's.
     if let Ok(entity) = selected.single()
+        && !kinds.get(entity).is_ok_and(Kind::is_group)
         && let Ok((_, transform, rect)) = nodes.get(entity)
     {
         let start = bounds(transform, rect);
@@ -172,6 +185,7 @@ fn grab(
                 entity,
                 handle,
                 start,
+                members: members(),
             });
             return;
         }
@@ -200,7 +214,11 @@ fn grab(
             Some((entity, transform.translation.truncate()))
         })
         .collect();
-    commands.insert_resource(Drag::Move { grab: world, start });
+    commands.insert_resource(Drag::Move {
+        grab: world,
+        start,
+        members: members(),
+    });
 }
 
 fn apply(
@@ -230,19 +248,28 @@ fn apply(
     // would respawn every node and panel mid-gesture, and lose the selection.
     let canvas = &mut document.bypass_change_detection().0;
 
+    // Groups refit live, and only during a gesture: nothing watches them at rest.
     match &*drag {
-        Drag::Move { grab, start } => {
+        Drag::Move {
+            grab,
+            start,
+            members,
+        } => {
             let delta = travel(world - *grab, locked);
+            let mut touched = Vec::new();
             for &(entity, from) in start {
                 if let Ok(id) = nodes.get(entity) {
                     moved(canvas, &id.0, from + delta, grid);
+                    touched.push(id.0.clone());
                 }
             }
+            group::fitted(canvas, members, touched);
         }
         Drag::Resize {
             entity,
             handle,
             start,
+            members,
         } => {
             if let Ok(id) = nodes.get(*entity) {
                 sized(
@@ -251,6 +278,7 @@ fn apply(
                     resized(*start, *handle, world, MIN_SIZE),
                     grid,
                 );
+                group::fitted(canvas, members, vec![id.0.clone()]);
             }
         }
         // Nothing to write until the drop lands on a node.
@@ -432,8 +460,20 @@ fn anchors(
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(Entity, &Transform, &NodeRect)>,
+    ids: Query<&NodeId>,
 ) {
     let (camera, cam_global, projection) = *camera;
+    // The group a lone node would join if it were let go here.
+    if let Some(Drag::Move { start, members, .. }) = drag.as_deref()
+        && let [(entity, _)] = start[..]
+        && let (Ok(id), Some(document)) = (ids.get(entity), document.as_deref())
+        && let Some(group) = group::target(&document.0, members, &id.0)
+        && let Some(group) = document.0.nodes.iter().find(|node| node.id == group)
+    {
+        let size = Vec2::new(group.width as f32, group.height as f32);
+        let top_left = Vec2::new(group.x as f32, group.y as f32);
+        gizmos.rect_2d(to_world(top_left + size / 2.0), size, ANCHOR);
+    }
     let (Some(world), Projection::Orthographic(ortho)) =
         (cursor_world(&window, (camera, cam_global)), projection)
     else {
@@ -442,7 +482,7 @@ fn anchors(
 
     // The axis a locked move is running along. Without it a locked drag reads as
     // a stuck one.
-    if let Some(Drag::Move { grab, start }) = drag.as_deref()
+    if let Some(Drag::Move { grab, start, .. }) = drag.as_deref()
         && keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight])
         && let Some(at) = moving_center(start, &nodes)
     {
@@ -720,21 +760,33 @@ fn release(
     if drag.is_none() || buttons.pressed(MouseButton::Left) {
         return;
     }
-    // On release rather than on the press: a restack respawns every node, and
-    // the drag holds the entities it is moving. A press that moved nothing is a
-    // selection click, and leaves the depth alone for the panel to set.
-    if let (Some(Drag::Move { start, .. }), Some(mut document)) = (drag.as_deref(), document)
-        && start
-            .iter()
-            .any(|&(entity, from)| moved_from(&nodes, entity, from))
-    {
-        // In the drag's own order, which puts a group behind the contents it
-        // carried along.
-        for &(entity, _) in start {
-            if let Ok((id, _)) = nodes.get(entity) {
-                restacked(&mut document.0, &id.0, Depth::Front);
+    match (drag.as_deref(), document) {
+        // On release rather than on the press: a restack respawns every node, and
+        // the drag holds the entities it is moving. A press that moved nothing is a
+        // selection click, and leaves the depth alone for the panel to set.
+        (Some(Drag::Move { start, members, .. }), Some(mut document))
+            if start
+                .iter()
+                .any(|&(entity, from)| moved_from(&nodes, entity, from)) =>
+        {
+            // In the drag's own order, which puts a group behind the contents it
+            // carried along.
+            for &(entity, _) in start {
+                if let Ok((id, _)) = nodes.get(entity) {
+                    restacked(&mut document.0, &id.0, Depth::Front);
+                }
+            }
+            // The drag has refitted every group already; only a join is left.
+            if let [(entity, _)] = start[..]
+                && let Ok((id, _)) = nodes.get(entity)
+                && let Some(group) = group::target(&document.0, members, &id.0)
+            {
+                let (group, mut members) = (group.to_owned(), members.clone());
+                let touched = group::joined(&mut document.0, &mut members, &id.0, &group);
+                group::fitted(&mut document.0, &members, touched);
             }
         }
+        _ => {}
     }
     commands.remove_resource::<Drag>();
 }
@@ -782,7 +834,7 @@ fn cursor(
     window: Single<(Entity, &Window, Option<&CursorIcon>)>,
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(&Transform, &NodeRect)>,
-    selected: Query<Entity, With<Selected>>,
+    selected: Query<(Entity, &Kind), With<Selected>>,
 ) {
     let (entity, window, current) = *window;
     let (camera, cam_global, projection) = *camera;
@@ -806,12 +858,16 @@ fn hovered_handle(
     camera: (&Camera, &GlobalTransform),
     projection: &Projection,
     nodes: &Query<(&Transform, &NodeRect)>,
-    selected: &Query<Entity, With<Selected>>,
+    selected: &Query<(Entity, &Kind), With<Selected>>,
 ) -> Option<IVec2> {
     let Projection::Orthographic(ortho) = projection else {
         return None;
     };
-    let (transform, rect) = nodes.get(selected.single().ok()?).ok()?;
+    let (entity, kind) = selected.single().ok()?;
+    if kind.is_group() {
+        return None;
+    }
+    let (transform, rect) = nodes.get(entity).ok()?;
     handle_at(
         bounds(transform, rect),
         cursor_world(window, camera)?,

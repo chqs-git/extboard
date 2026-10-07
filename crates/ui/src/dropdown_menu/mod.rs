@@ -4,16 +4,17 @@ use bevy::input::InputSystems;
 use bevy::prelude::*;
 
 use crate::client::Document;
-use crate::edit::duplicated;
+use crate::edit::{duplicated, in_group, ungrouped};
 use crate::node::{NodeId, NodeRect};
 use crate::select::{bounds, cursor_world, pick};
 
 const WIDTH: f32 = 180.0;
 const PAD: f32 = 5.0;
 const ROW: f32 = 13.0;
-// What the menu stands to be, for keeping it inside the window. Three rows and
-// the padding around them; an estimate, because layout has not run yet.
-const HEIGHT: f32 = 82.0;
+// What a row and the padding around them stand to be, for keeping the menu
+// inside the window; an estimate, because layout has not run yet.
+const ROW_HEIGHT: f32 = 24.0;
+const FRAME_HEIGHT: f32 = 10.0;
 
 const BG: Color = Color::srgb(0.12, 0.13, 0.16);
 const FG: Color = Color::srgb(0.86, 0.88, 0.92);
@@ -31,7 +32,7 @@ struct ContextMenu;
 struct Closing;
 
 // The row, and the node it was opened on. The id is copied onto every row rather
-// than looked up through the parent: it is sixteen bytes and this is three rows.
+// than looked up through the parent: it is sixteen bytes and this is a few rows.
 #[derive(Component)]
 struct Item {
     action: Action,
@@ -43,6 +44,7 @@ enum Action {
     Copy,
     Duplicate,
     CopyId,
+    Ungroup,
 }
 
 impl Plugin for MenuPlugin {
@@ -91,6 +93,7 @@ impl Action {
             Action::Copy => "copy",
             Action::Duplicate => "duplicate",
             Action::CopyId => "copy node id",
+            Action::Ungroup => "remove from group",
         }
     }
 }
@@ -104,6 +107,7 @@ fn open(
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     nodes: Query<(&NodeId, &Transform, &NodeRect)>,
     existing: Query<Entity, With<ContextMenu>>,
+    document: Res<Document>,
 ) {
     if !buttons.just_pressed(MouseButton::Right) {
         return;
@@ -120,11 +124,16 @@ fn open(
         commands.entity(entity).despawn();
     }
 
+    let mut actions = vec![Action::Copy, Action::Duplicate, Action::CopyId];
+    if in_group(&document.0, &node) {
+        actions.push(Action::Ungroup);
+    }
     // Clamped, or a node near the edge opens its menu off the window.
+    let height = FRAME_HEIGHT + ROW_HEIGHT * actions.len() as f32;
     let left = at.x.min((window.width() - WIDTH).max(0.0));
-    let top = at.y.min((window.height() - HEIGHT).max(0.0));
+    let top = at.y.min((window.height() - height).max(0.0));
     commands.spawn(menu(left, top)).with_children(|parent| {
-        for action in [Action::Copy, Action::Duplicate, Action::CopyId] {
+        for action in actions {
             parent
                 .spawn(row(action, &node))
                 .observe(activate)
@@ -170,6 +179,9 @@ fn activate(
         }
         Action::Duplicate => {
             duplicated(&mut document.0, frames.0, &[&item.node]);
+        }
+        Action::Ungroup => {
+            ungrouped(&mut document.0, &item.node);
         }
     }
 }
