@@ -13,7 +13,7 @@ use super::{GRID, added, moved, with_contents};
 
 // Room around the selection a new group gets, so its contents are not flush
 // against its own outline.
-const GROUP_PAD: f32 = 24.0;
+pub(super) const GROUP_PAD: f32 = 24.0;
 
 #[cfg(not(target_arch = "wasm32"))]
 const PASTED: &str = "pasted.png";
@@ -69,11 +69,15 @@ pub(super) fn nudge(
     // Bypassed like a drag: respawning every node would drop the selection, and
     // a nudge is meant to be repeatable.
     let canvas = &mut document.bypass_change_detection().0;
+    let members = super::group::members(canvas);
+    let mut touched = Vec::new();
     for entity in with_contents(selected.iter().collect(), &nodes, &kinds) {
         if let (Ok(id), Ok((_, transform, _))) = (ids.get(entity), nodes.get(entity)) {
             moved(canvas, &id.0, transform.translation.truncate() + step, 1.0);
+            touched.push(id.0.clone());
         }
     }
+    super::group::fitted(canvas, &members, touched);
 }
 
 // World space, so up is +y and the flip into canvas coordinates is `moved`'s.

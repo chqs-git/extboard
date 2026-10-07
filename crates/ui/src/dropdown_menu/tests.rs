@@ -56,7 +56,12 @@ fn a_press_with_no_menu_is_left_alone() {
 
 #[test]
 fn every_action_is_labelled() {
-    for action in [Action::Copy, Action::Duplicate, Action::CopyId] {
+    for action in [
+        Action::Copy,
+        Action::Duplicate,
+        Action::CopyId,
+        Action::Ungroup,
+    ] {
         assert!(!action.label().is_empty());
     }
 }
