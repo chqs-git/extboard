@@ -271,6 +271,14 @@ impl Theme {
         })
     }
 
+    // A space's palette alone, to draw it somewhere other than on its board.
+    pub fn of_canvas(canvas: &extboard_core::Canvas) -> Self {
+        Self {
+            live: canvas.theme(),
+            ..default()
+        }
+    }
+
     #[cfg(test)]
     pub fn from_colors(colors: &[&str]) -> Self {
         Self {
