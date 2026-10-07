@@ -6,8 +6,8 @@ use bevy::prelude::*;
 //
 // Embedded rather than loaded from a file: the asset root is the spaces dir,
 // which holds a person's boards and not our furniture, and in the browser a
-// file would be one more thing for extd to serve. Four of them is a kilobyte.
-const ICONS: [(&str, &[u8]); 4] = [
+// file would be one more thing for extd to serve. Five of them is a kilobyte.
+const ICONS: [(&str, &[u8]); 5] = [
     ("send_to_back", include_bytes!("../icons/send_to_back.png")),
     (
         "send_backward",
@@ -15,6 +15,7 @@ const ICONS: [(&str, &[u8]); 4] = [
     ),
     ("send_forward", include_bytes!("../icons/send_forward.png")),
     ("send_to_top", include_bytes!("../icons/send_to_top.png")),
+    ("sensor_door", include_bytes!("../icons/sensor_door.png")),
 ];
 
 pub struct IconPlugin;

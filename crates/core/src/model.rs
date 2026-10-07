@@ -209,4 +209,14 @@ impl Canvas {
     pub fn to_pretty_string(&self) -> String {
         serde_json::to_string_pretty(self).expect("Canvas always serializes")
     }
+
+    // The space this one was made inside. Having one is what keeps a space
+    // off the spaces list.
+    pub fn parent(&self) -> Option<&str> {
+        self.extra.get("extboard")?.get("parent")?.as_str()
+    }
+
+    pub fn set_parent(&mut self, parent: &str) {
+        object_mut(&mut self.extra, "extboard").insert("parent".into(), parent.into());
+    }
 }

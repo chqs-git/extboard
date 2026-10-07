@@ -6,7 +6,7 @@ use bevy::prelude::*;
 use crate::client::Document;
 use crate::edit::{duplicated, in_group, ungrouped};
 use crate::node::{NodeId, NodeRect};
-use crate::select::{bounds, cursor_world, pick};
+use crate::select::{bounds, cursor_world, pick, pressed_a_panel};
 
 const WIDTH: f32 = 180.0;
 const PAD: f32 = 5.0;
@@ -31,12 +31,13 @@ struct ContextMenu;
 #[derive(Component)]
 struct Closing;
 
-// The row, and the node it was opened on. The id is copied onto every row rather
-// than looked up through the parent: it is sixteen bytes and this is a few rows.
+// The row, and the node and board point it was opened on. Copied onto every row
+// rather than looked up through the parent: this is a few rows.
 #[derive(Component)]
 struct Item {
     action: Action,
     node: String,
+    at: Vec2,
 }
 
 #[derive(Clone, Copy)]
@@ -45,6 +46,7 @@ enum Action {
     Duplicate,
     CopyId,
     Ungroup,
+    NewSpace,
 }
 
 impl Plugin for MenuPlugin {
@@ -60,7 +62,11 @@ impl Plugin for MenuPlugin {
             // Only `open` waits for the document, and only to keep a row — whose
             // observer writes it — from existing before it does. Closing waits
             // for nothing: a menu that cannot be dismissed is a stuck window.
-            (open.run_if(resource_exists::<Document>), dismiss).chain(),
+            (
+                open.run_if(resource_exists::<Document>.and_then(not(pressed_a_panel))),
+                dismiss,
+            )
+                .chain(),
         );
     }
 }
@@ -94,12 +100,13 @@ impl Action {
             Action::Duplicate => "duplicate",
             Action::CopyId => "copy node id",
             Action::Ungroup => "remove from group",
+            Action::NewSpace => "new space",
         }
     }
 }
 
-// Right-click a node for its menu. Only the left button moves or selects
-// anything, so nothing else in the app reads this press.
+// Right-click a node for its menu, or the empty board for one that only makes a
+// space. Only the left button moves or selects anything, so nothing else reads this.
 fn open(
     mut commands: Commands,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -115,19 +122,29 @@ fn open(
     let Some(at) = window.cursor_position() else {
         return;
     };
-    let Some(node) = under(&window, *camera, &nodes) else {
+    let Some(world) = cursor_world(&window, *camera) else {
         return;
     };
+    let node = under(world, &nodes);
     // A second right-click moves the menu rather than stacking another one, and
     // takes one already marked for closing with it.
     for entity in &existing {
         commands.entity(entity).despawn();
     }
 
-    let mut actions = vec![Action::Copy, Action::Duplicate, Action::CopyId];
-    if in_group(&document.0, &node) {
-        actions.push(Action::Ungroup);
-    }
+    let actions = match &node {
+        Some(node) if in_group(&document.0, node) => {
+            vec![
+                Action::Copy,
+                Action::Duplicate,
+                Action::CopyId,
+                Action::Ungroup,
+            ]
+        }
+        Some(_) => vec![Action::Copy, Action::Duplicate, Action::CopyId],
+        None => vec![Action::NewSpace],
+    };
+    let node = node.unwrap_or_default();
     // Clamped, or a node near the edge opens its menu off the window.
     let height = FRAME_HEIGHT + ROW_HEIGHT * actions.len() as f32;
     let left = at.x.min((window.width() - WIDTH).max(0.0));
@@ -135,7 +152,7 @@ fn open(
     commands.spawn(menu(left, top)).with_children(|parent| {
         for action in actions {
             parent
-                .spawn(row(action, &node))
+                .spawn(row(action, &node, world))
                 .observe(activate)
                 .observe(highlight)
                 .observe(unhighlight);
@@ -158,6 +175,8 @@ fn activate(
     frames: Res<FrameCount>,
     mut document: ResMut<Document>,
     mut clipboard: ResMut<Clipboard>,
+    space: Res<crate::client::Space>,
+    mut naming: ResMut<crate::spaces::Naming>,
 ) {
     let Ok(item) = items.get(press.entity) else {
         return;
@@ -182,6 +201,15 @@ fn activate(
         }
         Action::Ungroup => {
             ungrouped(&mut document.0, &item.node);
+        }
+        Action::NewSpace => {
+            if let Some(parent) = space.id() {
+                naming.0 = Some(crate::spaces::Draft {
+                    parent: parent.to_owned(),
+                    world: item.at,
+                    screen: press.pointer_location.position,
+                });
+            }
         }
     }
 }
@@ -227,11 +255,12 @@ fn menu(left: f32, top: f32) -> impl Bundle {
     )
 }
 
-fn row(action: Action, node: &str) -> impl Bundle {
+fn row(action: Action, node: &str, at: Vec2) -> impl Bundle {
     (
         Item {
             action,
             node: node.to_owned(),
+            at,
         },
         Node {
             padding: UiRect::axes(px(7.0), px(4.0)),
@@ -248,12 +277,7 @@ fn row(action: Action, node: &str) -> impl Bundle {
     )
 }
 
-fn under(
-    window: &Window,
-    camera: (&Camera, &GlobalTransform),
-    nodes: &Query<(&NodeId, &Transform, &NodeRect)>,
-) -> Option<String> {
-    let world = cursor_world(window, camera)?;
+fn under(world: Vec2, nodes: &Query<(&NodeId, &Transform, &NodeRect)>) -> Option<String> {
     pick(
         nodes
             .iter()

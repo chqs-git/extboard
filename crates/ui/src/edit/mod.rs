@@ -9,7 +9,7 @@ use crate::scene::{draw_arrow, segments};
 use crate::select::{Selected, bounds, cursor_world, pick};
 
 pub const MIN_SIZE: f32 = 40.0;
-const NEW_SIZE: Vec2 = Vec2::new(120.0, 120.0);
+pub const NEW_SIZE: Vec2 = Vec2::new(120.0, 120.0);
 // What a shift-nudge steps by, what a copy is offset by, and what a drag snaps
 // to while alt is held.
 const GRID: f32 = 10.0;
@@ -108,7 +108,8 @@ impl Plugin for EditPlugin {
                         resource_exists::<Document>
                             .and_then(not(crate::text::editing))
                             .and_then(not(crate::shape::typing))
-                            .and_then(not(crate::theme::typing)),
+                            .and_then(not(crate::theme::typing))
+                            .and_then(not(crate::spaces::typing)),
                     ),
                 cursor,
             )
