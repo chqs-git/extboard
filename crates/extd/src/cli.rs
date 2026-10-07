@@ -49,6 +49,14 @@ pub enum Command {
         check: bool,
     },
 
+    // Trash the inner spaces no door leads to, and the images and fonts no
+    // space uses, once they have been so for five days. `serve` does it daily.
+    Gc {
+        // List today's garbage instead, waiting or not.
+        #[arg(long)]
+        check: bool,
+    },
+
     Pull {
         file: PathBuf,
 
@@ -106,6 +114,18 @@ pub fn fmt(file: &Path, check: bool) -> Result<(), Box<dyn Error>> {
         return Err(format!("{}: not formatted", file.display()).into());
     }
     Ok(fs::write(file, formatted)?)
+}
+
+pub fn gc(check: bool) -> Result<(), Box<dyn Error>> {
+    let store = crate::store::Store::new()?;
+    let paths = match check {
+        true => store.garbage()?,
+        false => store.collect(crate::store::secs(std::time::SystemTime::now()))?,
+    };
+    for path in paths {
+        println!("{}", path.display());
+    }
+    Ok(())
 }
 
 pub fn pull(file: &Path, space: Option<&str>, server: Option<&str>) -> Result<(), Box<dyn Error>> {

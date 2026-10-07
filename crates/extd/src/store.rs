@@ -1,9 +1,11 @@
-use extboard_core::{Canvas, rev};
-use std::collections::HashMap;
+use extboard_core::{Canvas, rev, url_path};
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs, io};
 use tokio::sync::RwLock;
 
@@ -39,6 +41,10 @@ pub enum StoreError {
 }
 
 type Result<T> = std::result::Result<T, StoreError>;
+
+// How long garbage waits before the trash, and the trash before it is gone: an
+// undo, an upload or a door still being saved has time to reach it again.
+pub const GRACE: u64 = 5 * 24 * 60 * 60;
 
 impl Space {
     pub fn exists(&self) -> bool {
@@ -136,6 +142,110 @@ impl Store {
         Ok(())
     }
 
+    // What nothing reaches: an inner space no other space links to, then the
+    // images and fonts no remaining space names. A space that will not parse stops it.
+    pub fn garbage(&self) -> Result<Vec<PathBuf>> {
+        let mut spaces = BTreeMap::new();
+        for id in self.list()? {
+            let bytes = fs::read(self.dir.join(format!("{id}.canvas")))?;
+            let canvas: Value =
+                serde_json::from_slice(&bytes).map_err(|source| StoreError::Parse {
+                    id: id.clone(),
+                    source,
+                })?;
+            let inner = canvas.pointer("/extboard/parent").is_some();
+            let mut text = String::new();
+            strings(&canvas, &mut text);
+            spaces.insert(id, (inner, text));
+        }
+
+        let mut garbage = Vec::new();
+        // Again until nothing goes, so an orphan's own inner spaces follow it.
+        while let Some(id) = spaces
+            .iter()
+            .find(|(id, (inner, _))| {
+                *inner
+                    && !spaces
+                        .iter()
+                        .any(|(other, (_, text))| other != *id && links_to(text, id))
+            })
+            .map(|(id, _)| id.clone())
+        {
+            spaces.remove(&id);
+            garbage.push(self.dir.join(format!("{id}.canvas")));
+        }
+
+        let named: String = spaces.into_values().map(|(_, text)| text).collect();
+        for sub in ["images", "fonts"] {
+            let entries = match fs::read_dir(self.dir.join(sub)) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                entries => entries?,
+            };
+            for entry in entries {
+                let entry = entry?;
+                let file = format!("{sub}/{}", entry.file_name().to_string_lossy());
+                if !named.contains(&file) && !named.contains(&url_path(&file)) {
+                    garbage.push(entry.path());
+                }
+            }
+        }
+        garbage.sort();
+        Ok(garbage)
+    }
+
+    // Moves into `.trash/<now>/` whatever has been garbage, and untouched, for
+    // GRACE; empties older trash. Returns what moved.
+    pub fn collect(&self, now: u64) -> Result<Vec<PathBuf>> {
+        let trash = self.dir.join(".trash");
+        fs::create_dir_all(&trash)?;
+        let ledger = trash.join("seen.json");
+        // A ledger that will not read starts the clocks again: later, never sooner.
+        let seen: BTreeMap<String, u64> = match fs::read(&ledger) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(e) => return Err(e.into()),
+        };
+
+        let (mut waiting, mut moved) = (BTreeMap::new(), Vec::new());
+        for path in self.garbage()? {
+            let name = path
+                .strip_prefix(&self.dir)
+                .expect("garbage is in the dir")
+                .to_string_lossy()
+                .into_owned();
+            let since = seen
+                .get(&name)
+                .copied()
+                .unwrap_or(now)
+                .max(secs(fs::metadata(&path)?.modified()?));
+            if now.saturating_sub(since) < GRACE {
+                waiting.insert(name, since);
+                continue;
+            }
+            let to = trash.join(now.to_string()).join(&name);
+            fs::create_dir_all(to.parent().expect("a batch dir above it"))?;
+            fs::rename(&path, &to)?;
+            moved.push(path);
+        }
+        fs::write(
+            &ledger,
+            serde_json::to_vec_pretty(&waiting).expect("a map of numbers"),
+        )?;
+
+        for entry in fs::read_dir(&trash)? {
+            let entry = entry?;
+            if let Some(at) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<u64>().ok())
+                && now.saturating_sub(at) >= GRACE
+            {
+                fs::remove_dir_all(entry.path())?;
+            }
+        }
+        Ok(moved)
+    }
+
     pub fn at(dir: PathBuf) -> Self {
         Self {
             dir,
@@ -184,6 +294,32 @@ fn write_new(dir: &std::path::Path, name: &std::path::Path, bytes: &[u8]) -> io:
         }
     }
     unreachable!("0.. never runs out")
+}
+
+// Every string in a space, one per line: a file node's path, a theme's font, a
+// door's link, wherever they sit.
+fn strings(value: &Value, out: &mut String) {
+    match value {
+        Value::String(s) => {
+            out.push_str(s);
+            out.push('\n');
+        }
+        Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
+        Value::Object(map) => map.values().for_each(|item| strings(item, out)),
+        _ => {}
+    }
+}
+
+// A door's markdown escapes the id, and no id holds a backslash, so dropping them
+// all reads it back.
+fn links_to(text: &str, id: &str) -> bool {
+    let text = text.replace('\\', "");
+    text.contains(&format!("/s/{id}")) || text.contains(&format!("/s/{}", url_path(id)))
+}
+
+pub fn secs(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 // Path traversal boundary: an id is one filename component, never a path.
@@ -338,6 +474,100 @@ mod tests {
             store.rename("c", "../x").await,
             Err(StoreError::BadId(_))
         ));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn garbage_is_what_no_space_reaches() {
+        let dir = std::env::temp_dir().join("extboard-garbage-test");
+        let _ = fs::remove_dir_all(&dir);
+        for sub in ["images", "fonts"] {
+            fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        let space = |id: &str, parent: Option<&str>, text: &str| {
+            let parent = parent.map_or(String::new(), |p| {
+                format!(r#","extboard":{{"parent":"{p}"}}"#)
+            });
+            fs::write(
+                dir.join(format!("{id}.canvas")),
+                format!(
+                    r#"{{"nodes":[{{"id":"n","type":"text","x":0,"y":0,"width":1,"height":1,"text":{}}}]{parent}}}"#,
+                    serde_json::to_string(text).unwrap()
+                ),
+            )
+            .unwrap();
+        };
+        space(
+            "top",
+            None,
+            r"[in](</s/top_in\<1\>>) ![](/f/images/my%20cat.png)",
+        );
+        space("top_in<1>", Some("top"), "images/kept.png");
+        space(
+            "top_orphan",
+            Some("top"),
+            "[deeper](/s/top_orphan_deeper) images/lost.png",
+        );
+        space("top_orphan_deeper", Some("top_orphan"), "");
+        fs::write(
+            dir.join("styled.canvas"),
+            r#"{"nodes":[],"theme":{"fonts":["fonts/Used.ttf"]}}"#,
+        )
+        .unwrap();
+        for file in [
+            "images/kept.png",
+            "images/my cat.png",
+            "images/lost.png",
+            "fonts/Used.ttf",
+            "fonts/Unused.otf",
+        ] {
+            fs::write(dir.join(file), "").unwrap();
+        }
+
+        let garbage = Store::at(dir.clone()).garbage().unwrap();
+        let names: Vec<_> = garbage
+            .iter()
+            .map(|path| path.strip_prefix(&dir).unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "fonts/Unused.otf",
+                "images/lost.png",
+                "top_orphan.canvas",
+                "top_orphan_deeper.canvas"
+            ]
+        );
+
+        fs::write(dir.join("broken.canvas"), "{").unwrap();
+        assert!(matches!(
+            Store::at(dir.clone()).garbage(),
+            Err(StoreError::Parse { .. })
+        ));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn garbage_waits_then_trashes_then_goes() {
+        let dir = std::env::temp_dir().join("extboard-collect-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("images")).unwrap();
+        fs::write(dir.join("images/lost.png"), "").unwrap();
+        let (store, now) = (Store::at(dir.clone()), secs(SystemTime::now()));
+
+        assert!(
+            store.collect(now).unwrap().is_empty(),
+            "first seen, not yet gone"
+        );
+        assert!(dir.join("images/lost.png").exists());
+
+        let later = now + GRACE;
+        assert_eq!(store.collect(later).unwrap(), [dir.join("images/lost.png")]);
+        let trashed = dir.join(format!(".trash/{later}/images/lost.png"));
+        assert!(trashed.exists());
+
+        store.collect(later + GRACE).unwrap();
+        assert!(!trashed.exists(), "old trash is emptied");
         fs::remove_dir_all(&dir).unwrap();
     }
 
