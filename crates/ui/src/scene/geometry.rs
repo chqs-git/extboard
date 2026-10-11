@@ -52,3 +52,34 @@ pub(super) fn edge_ends(
     let (a, b) = extboard_core::edge_ends(from, from_side, to, to_side);
     (to_world(Vec2::from(a)), to_world(Vec2::from(b)))
 }
+
+pub(super) fn rank(canvas: &Canvas, edge: &extboard_core::Edge) -> Option<usize> {
+    let index = |id: &str| canvas.nodes.iter().position(|node| node.id == id);
+    Some(index(&edge.from_node)?.max(index(&edge.to_node)?))
+}
+
+pub fn edge_depth(canvas: &Canvas, id: &str) -> Option<f32> {
+    let edge = canvas.edges.iter().find(|edge| edge.id == id)?;
+    Some(crate::node::depth(rank(canvas, edge)?, canvas.nodes.len()))
+}
+
+pub fn crosses(rect: Rect, a: Vec2, b: Vec2) -> bool {
+    let span = b - a;
+    let (mut low, mut high) = (0.0_f32, 1.0_f32);
+    for axis in 0..2 {
+        let (min, max, from, step) = (rect.min[axis], rect.max[axis], a[axis], span[axis]);
+        if step.abs() < f32::EPSILON {
+            if from < min || from > max {
+                return false;
+            }
+            continue;
+        }
+        let (t0, t1) = ((min - from) / step, (max - from) / step);
+        low = low.max(t0.min(t1));
+        high = high.min(t0.max(t1));
+        if low > high {
+            return false;
+        }
+    }
+    true
+}

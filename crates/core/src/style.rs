@@ -107,6 +107,24 @@ pub fn set_align(extra: &mut Map<String, Value>, align: Option<usize>) {
     };
 }
 
+pub const DASHES: [&str; 3] = ["solid", "dashed", "dotted"];
+pub const SOLID: usize = 0;
+
+pub fn dash(extra: &Map<String, Value>) -> Option<usize> {
+    let name = extra.get("lineStyle")?.as_str()?;
+    DASHES.iter().position(|dash| *dash == name)
+}
+
+pub fn set_dash(extra: &mut Map<String, Value>, dash: Option<usize>) {
+    match dash
+        .filter(|dash| *dash != SOLID)
+        .and_then(|dash| DASHES.get(dash))
+    {
+        Some(name) => extra.insert("lineStyle".to_owned(), Value::from(*name)),
+        None => extra.remove("lineStyle"),
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +215,20 @@ mod tests {
         set_align(&mut extra, Some(LEFT_ALIGN));
         assert!(extra.is_empty(), "{extra:?}");
         assert_eq!(align(&with("textAlign", Value::from("sideways"))), None);
+    }
+
+    #[test]
+    fn solid_is_no_key_and_the_other_two_round_trip() {
+        let mut extra = Map::new();
+        set_dash(&mut extra, Some(2));
+        assert_eq!(
+            extra.get("lineStyle").and_then(Value::as_str),
+            Some("dotted")
+        );
+        assert_eq!(dash(&extra), Some(2));
+
+        set_dash(&mut extra, Some(SOLID));
+        assert!(extra.is_empty(), "{extra:?}");
+        assert_eq!(dash(&with("lineStyle", Value::from("wavy"))), None);
     }
 }
