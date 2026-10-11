@@ -44,6 +44,8 @@ impl Plugin for ScenePlugin {
             (
                 spawn_edges
                     .in_set(crate::node::Respawn)
+                    // Ahead of the node respawn, which spends the `Reselect` both read.
+                    .before(crate::node::spawn_nodes)
                     .run_if(resource_exists_and_changed::<Document>),
                 // Every frame, like the edges themselves: a drag moves nodes
                 // without waking change detection, and the label has to keep up.
@@ -112,11 +114,14 @@ fn spawn_edges(
     mut commands: Commands,
     document: Res<Document>,
     theme: Res<Theme>,
+    reselect: Option<Res<crate::node::Reselect>>,
     existing: Query<(Entity, &EdgeId, Has<Selected>)>,
 ) {
+    // A reselect names nodes only, so it leaves no edge selected.
+    let fresh = reselect.is_some_and(|reselect| reselect.0.is_some());
     let mut selected: Vec<&str> = Vec::new();
     for (entity, id, picked) in &existing {
-        if picked {
+        if picked && !fresh {
             selected.push(id.0.as_str());
         }
         commands.entity(entity).despawn();

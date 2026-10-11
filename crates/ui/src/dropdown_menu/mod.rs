@@ -4,7 +4,7 @@ use bevy::input::InputSystems;
 use bevy::prelude::*;
 
 use crate::client::Document;
-use crate::edit::{duplicated, in_group, ungrouped};
+use crate::edit::{NEW_SIZE, PasteAt, created, duplicated, in_group, ungrouped};
 use crate::node::{NodeId, NodeRect};
 use crate::select::{bounds, cursor_world, pick, pressed_a_panel};
 
@@ -46,6 +46,12 @@ enum Action {
     Duplicate,
     CopyId,
     Ungroup,
+    NewNode,
+    Paste,
+    SelectAll,
+    // Whether the panel is up now, which is what the row offers to undo.
+    Theme(bool),
+    Scripts(bool),
     NewSpace,
 }
 
@@ -100,13 +106,24 @@ impl Action {
             Action::Duplicate => "duplicate",
             Action::CopyId => "copy node id",
             Action::Ungroup => "remove from group",
+            Action::NewNode => "new node",
+            Action::Paste => "paste",
+            Action::SelectAll => "select all",
+            Action::Theme(false) => "open theme",
+            Action::Theme(true) => "close theme",
+            Action::Scripts(false) => "open scripts",
+            Action::Scripts(true) => "close scripts",
             Action::NewSpace => "new space",
         }
     }
 }
 
-// Right-click a node for its menu, or the empty board for one that only makes a
-// space. Only the left button moves or selects anything, so nothing else reads this.
+// Right-click a node for its menu, or the empty board for the board's own. Only
+// the left button moves or selects anything, so nothing else reads this.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
 fn open(
     mut commands: Commands,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -115,6 +132,8 @@ fn open(
     nodes: Query<(&NodeId, &Transform, &NodeRect)>,
     existing: Query<Entity, With<ContextMenu>>,
     document: Res<Document>,
+    theme: Res<crate::theme::Open>,
+    sidebar: Res<crate::script::Sidebar>,
 ) {
     if !buttons.just_pressed(MouseButton::Right) {
         return;
@@ -142,7 +161,14 @@ fn open(
             ]
         }
         Some(_) => vec![Action::Copy, Action::Duplicate, Action::CopyId],
-        None => vec![Action::NewSpace],
+        None => vec![
+            Action::NewNode,
+            Action::NewSpace,
+            Action::Paste,
+            Action::SelectAll,
+            Action::Theme(theme.0),
+            Action::Scripts(sidebar.open),
+        ],
     };
     let node = node.unwrap_or_default();
     // Clamped, or a node near the edge opens its menu off the window.
@@ -169,14 +195,21 @@ fn dismiss(mut commands: Commands, closing: Query<Entity, With<Closing>>) {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
 fn activate(
     press: On<Pointer<Press>>,
+    mut commands: Commands,
     items: Query<&Item>,
     frames: Res<FrameCount>,
     mut document: ResMut<Document>,
     mut clipboard: ResMut<Clipboard>,
     space: Res<crate::client::Space>,
     mut naming: ResMut<crate::spaces::Naming>,
+    mut editing: ResMut<crate::text::Editing>,
+    mut paste: ResMut<PasteAt>,
 ) {
     let Ok(item) = items.get(press.entity) else {
         return;
@@ -201,6 +234,25 @@ fn activate(
         }
         Action::Ungroup => {
             ungrouped(&mut document.0, &item.node);
+        }
+        // Opened for typing, like a double-click on the board.
+        Action::NewNode => {
+            let id = created(
+                &mut document.0,
+                frames.0,
+                Rect::from_center_size(item.at, NEW_SIZE),
+            );
+            editing.0 = Some(crate::text::Target::Node(id));
+        }
+        Action::Paste => paste.0 = Some((press.pointer_location.position, item.at)),
+        Action::SelectAll => {
+            commands.run_system_cached(crate::select::select_all);
+        }
+        Action::Theme(_) => {
+            commands.run_system_cached(crate::theme::flip);
+        }
+        Action::Scripts(_) => {
+            commands.run_system_cached(crate::script::flip_sidebar);
         }
         Action::NewSpace => {
             if let Some(parent) = space.id() {

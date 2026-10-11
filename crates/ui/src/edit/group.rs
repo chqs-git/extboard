@@ -234,7 +234,7 @@ mod tests {
         Canvas {
             nodes: vec![
                 node("g", 0, 0, 400, 200, NodeKind::Group { label: None }),
-                card("a", 24, 24),
+                card("a", PAD.into(), PAD.into()),
                 card("loose", 1000, 0),
             ],
             ..Default::default()
@@ -252,11 +252,17 @@ mod tests {
         canvas.nodes[1].x = 600;
         canvas.nodes[2].x = 500;
         fitted(&mut canvas, &before, vec!["a".into(), "loose".into()]);
-        assert_eq!(at(&canvas, "g"), IRect::new(576, 0, 724, 148));
+        assert_eq!(
+            at(&canvas, "g"),
+            IRect::new(600 - PAD, 0, 700 + PAD, 100 + 2 * PAD)
+        );
         // And back, shrinking round it rather than keeping the room it had.
-        canvas.nodes[1].x = 24;
+        canvas.nodes[1].x = PAD.into();
         fitted(&mut canvas, &before, vec!["a".into()]);
-        assert_eq!(at(&canvas, "g"), IRect::new(0, 0, 148, 148));
+        assert_eq!(
+            at(&canvas, "g"),
+            IRect::new(0, 0, 100 + 2 * PAD, 100 + 2 * PAD)
+        );
     }
 
     #[test]
@@ -272,12 +278,18 @@ mod tests {
         let mut canvas = board();
         let mut before = members(&canvas);
         // Over the right half of `a`, and lower than it.
-        (canvas.nodes[2].x, canvas.nodes[2].y) = (100, 30);
+        (canvas.nodes[2].x, canvas.nodes[2].y) = (100, (PAD + 6).into());
         let group = target(&canvas, &before, "loose").unwrap().to_owned();
         let touched = joined(&mut canvas, &mut before, "loose", &group);
-        assert_eq!(at(&canvas, "loose"), IRect::new(148, 30, 248, 130));
+        assert_eq!(
+            at(&canvas, "loose"),
+            IRect::new(100 + 2 * PAD, PAD + 6, 200 + 2 * PAD, PAD + 106)
+        );
         fitted(&mut canvas, &before, touched);
-        assert_eq!(at(&canvas, "g"), IRect::new(0, 0, 272, 154));
+        assert_eq!(
+            at(&canvas, "g"),
+            IRect::new(0, 0, 200 + 3 * PAD, 106 + 2 * PAD)
+        );
         assert_eq!(target(&canvas, &before, "loose"), None, "already a member");
     }
 
@@ -291,10 +303,18 @@ mod tests {
     #[test]
     fn removing_a_node_steps_it_just_clear_of_what_is_left() {
         let mut canvas = board();
-        canvas.nodes.push(card("b", 148, 24));
+        canvas
+            .nodes
+            .push(card("b", (100 + 2 * PAD).into(), PAD.into()));
         assert!(ungrouped(&mut canvas, "b"));
-        assert_eq!(at(&canvas, "b"), IRect::new(172, 24, 272, 124));
-        assert_eq!(at(&canvas, "g"), IRect::new(0, 0, 148, 148));
+        assert_eq!(
+            at(&canvas, "b"),
+            IRect::new(100 + 3 * PAD, PAD, 200 + 3 * PAD, 100 + PAD)
+        );
+        assert_eq!(
+            at(&canvas, "g"),
+            IRect::new(0, 0, 100 + 2 * PAD, 100 + 2 * PAD)
+        );
         assert!(!in_group(&canvas, "b"));
     }
 
@@ -303,7 +323,10 @@ mod tests {
         let mut canvas = board();
         assert!(in_group(&canvas, "a"));
         assert!(ungrouped(&mut canvas, "a"));
-        assert_eq!(at(&canvas, "a"), IRect::new(-124, 24, -24, 124));
+        assert_eq!(
+            at(&canvas, "a"),
+            IRect::new(-100 - PAD, PAD, -PAD, 100 + PAD)
+        );
         assert!(!in_group(&canvas, "a"));
         assert_eq!(at(&canvas, "g"), IRect::new(0, 0, 400, 200));
         assert!(!ungrouped(&mut canvas, "loose"));

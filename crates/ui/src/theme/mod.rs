@@ -123,12 +123,12 @@ struct NewName;
 // no hue left to read: without it, dragging into the corner loses the one the
 // plane was showing.
 #[derive(Resource, Default)]
-struct Picking(Option<Picked>);
+pub(crate) struct Picking(Option<Picked>);
 
 // Which text has its font list open. The two never open together: the panel
 // grows downwards and one tall thing below the sections is enough.
 #[derive(Resource, Default)]
-struct Targeting(Option<usize>);
+pub(crate) struct Targeting(Option<usize>);
 
 #[derive(Clone, Copy)]
 struct Picked {
@@ -524,21 +524,25 @@ fn repaint(theme: Res<Theme>, mut clear: ResMut<ClearColor>) {
     }
 }
 
-fn toggle(
-    keys: Res<ButtonInput<KeyCode>>,
+fn toggle(keys: Res<ButtonInput<KeyCode>>, mut commands: Commands) {
+    if command(&keys) && keys.just_pressed(KeyCode::KeyT) {
+        commands.run_system_cached(flip);
+    }
+}
+
+// Ctrl-T, and the context menu's row.
+pub(crate) fn flip(
     mut open: ResMut<Open>,
     mut picking: ResMut<Picking>,
     mut targeting: ResMut<Targeting>,
     mut sidebar: ResMut<Sidebar>,
 ) {
-    if command(&keys) && keys.just_pressed(KeyCode::KeyT) {
-        open.0 = !open.0;
-        picking.0 = None;
-        targeting.0 = None;
-        // Both live on the right edge, so the one being opened puts the other
-        // away rather than drawing over it.
-        sidebar.open &= !open.0;
-    }
+    open.0 = !open.0;
+    picking.0 = None;
+    targeting.0 = None;
+    // Both live on the right edge, so the one being opened puts the other
+    // away rather than drawing over it.
+    sidebar.open &= !open.0;
 }
 
 // Ctrl-S is the save button. Undo is not here: a theme edit is an ordinary

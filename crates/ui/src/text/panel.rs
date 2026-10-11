@@ -61,7 +61,12 @@ pub(super) fn spawn_panels(
                     position_type: PositionType::Absolute,
                     width: px(size.x),
                     height: px(size.y),
-                    overflow: Overflow::clip(),
+                    // A group's label hangs above its box, outside the clip.
+                    overflow: if is_group(node) {
+                        Overflow::visible()
+                    } else {
+                        Overflow::clip()
+                    },
                     ..default()
                 },
                 MaterialNode(paint(&mut palette, &mut materials, &theme, node)),
@@ -147,7 +152,18 @@ fn inside(
             ));
         }
         (NodeKind::Group { label: Some(label) }, _) => {
-            parent.spawn(heading(&interpolate(label, vars), &face, face.ink, raster));
+            // Sat on the box's top edge, over any panel, under every overlay.
+            parent.spawn((
+                heading(&interpolate(label, vars), &face, face.ink, raster),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(0.0),
+                    bottom: percent(100.0),
+                    ..default()
+                },
+                GlobalZIndex(0),
+                ZIndex(i32::MAX),
+            ));
         }
         (NodeKind::Link { url }, _) => {
             if let Some(space) = space_path(url) {
@@ -156,6 +172,10 @@ fn inside(
         }
         _ => {}
     }
+}
+
+fn is_group(node: &CanvasNode) -> bool {
+    matches!(node.kind, NodeKind::Group { .. })
 }
 
 fn heading(text: &str, face: &Face, ink: Color, raster: f32) -> impl Bundle {

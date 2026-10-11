@@ -61,6 +61,12 @@ fn every_action_is_labelled() {
         Action::Duplicate,
         Action::CopyId,
         Action::Ungroup,
+        Action::NewNode,
+        Action::Paste,
+        Action::SelectAll,
+        Action::Theme(false),
+        Action::Scripts(true),
+        Action::NewSpace,
     ] {
         assert!(!action.label().is_empty());
     }

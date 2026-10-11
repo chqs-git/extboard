@@ -29,6 +29,17 @@ pub struct SelectPlugin;
 #[derive(Component)]
 pub struct Selected;
 
+// The context menu's "select all": every node and edge on the board.
+pub fn select_all(
+    mut commands: Commands,
+    nodes: Query<Entity, With<NodeRect>>,
+    edges: Query<Entity, With<EdgeId>>,
+) {
+    for entity in nodes.iter().chain(&edges) {
+        commands.entity(entity).insert(Selected);
+    }
+}
+
 // The frame a press landed on a panel rather than on the board. Picking is what
 // stamps it, and it is read back in `Update`: a hit test of our own cannot do
 // this job, because a panel respawning under the cursor -- which is what a

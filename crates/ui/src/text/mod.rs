@@ -19,7 +19,7 @@ mod link;
 mod panel;
 
 pub use edit_text::{Editing, Target, editing};
-use edit_text::{release_field, toggle, track_label};
+use edit_text::{release_field, select_all, toggle, track_label};
 use link::Doors;
 pub use link::Links;
 use panel::{outline_panels, spawn_label_editor, spawn_panels, track_panels};
@@ -109,6 +109,7 @@ impl Plugin for TextPlugin {
             .add_systems(
                 Update,
                 (
+                    select_all,
                     track_raster,
                     // `and_then` is lazy, so the changed checks never run before
                     // the document lands: entering edit mode has to rebuild a

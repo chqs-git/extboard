@@ -1,11 +1,11 @@
 use bevy::input_focus::{AutoFocus, InputFocus};
 use bevy::prelude::*;
-use bevy::text::{EditableText, TextCursorStyle};
+use bevy::text::{EditableText, TextCursorStyle, TextEdit};
 use extboard_core::{BACKGROUND, Canvas, NodeKind};
 
 use crate::camera::world_to_screen;
 use crate::client::Document;
-use crate::edit::double_click;
+use crate::edit::{command, double_click};
 use crate::node::{NodeId, NodeRect};
 use crate::scene::{EdgeId, nearest};
 use crate::select::{EDGE_PX, bounds, cursor_world, pick};
@@ -342,5 +342,19 @@ pub(super) fn written_back(canvas: &mut Canvas, target: &Target, text: &str) -> 
             true
         }
         Target::Script(name) => crate::script::set_script(canvas, name, text),
+    }
+}
+
+// bevy binds select-all to Cmd alone on a Mac, so Ctrl-A there did nothing.
+pub(super) fn select_all(
+    keys: Res<ButtonInput<KeyCode>>,
+    focus: Res<InputFocus>,
+    mut fields: Query<&mut EditableText>,
+) {
+    if !command(&keys) || !keys.just_pressed(KeyCode::KeyA) {
+        return;
+    }
+    if let Some(mut field) = focus.get().and_then(|entity| fields.get_mut(entity).ok()) {
+        field.queue_edit(TextEdit::SelectAll);
     }
 }

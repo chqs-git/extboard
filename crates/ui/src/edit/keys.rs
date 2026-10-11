@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use extboard_core::{Canvas, Node as CanvasNode, NodeKind, fresh_id};
 
 use crate::client::Document;
-use crate::node::{NodeId, NodeKind as Kind, NodeRect, to_world};
+use crate::node::{NodeId, NodeKind as Kind, NodeRect, Reselect, to_world};
 use crate::scene::EdgeId;
 use crate::select::{Selected, bounds, cursor_world};
 
@@ -13,7 +13,7 @@ use super::{GRID, added, moved, with_contents};
 
 // Room around the selection a new group gets, so its contents are not flush
 // against its own outline.
-pub(super) const GROUP_PAD: f32 = 24.0;
+pub(super) const GROUP_PAD: f32 = 40.0;
 
 #[cfg(not(target_arch = "wasm32"))]
 const PASTED: &str = "pasted.png";
@@ -136,6 +136,10 @@ pub fn duplicated(canvas: &mut Canvas, seed: u32, ids: &[&str]) -> Vec<String> {
 #[derive(Resource, Default)]
 pub(super) struct Pasting(Option<(ClipboardRead, Vec2)>);
 
+// A paste asked for by the context menu, at its screen and board points.
+#[derive(Resource, Default)]
+pub struct PasteAt(pub Option<(Vec2, Vec2)>);
+
 pub(super) fn copy(
     keys: Res<ButtonInput<KeyCode>>,
     selected: Query<&NodeId, With<Selected>>,
@@ -172,14 +176,19 @@ pub(super) fn paste(
     uploads: Res<Uploads>,
     mut clipboard: ResMut<Clipboard>,
     mut pasting: ResMut<Pasting>,
+    mut asked: ResMut<PasteAt>,
 ) {
-    if !command(&keys) || !keys.just_pressed(KeyCode::KeyV) {
+    let (screen, world) = match asked.0.take() {
+        Some((screen, world)) => (Some(screen), Some(world)),
+        None if command(&keys) && keys.just_pressed(KeyCode::KeyV) => {
+            (window.cursor_position(), cursor_world(&window, *camera))
+        }
+        None => return,
+    };
+    if took_an_image(&mut clipboard, &uploads, screen) {
         return;
     }
-    if took_an_image(&mut clipboard, &uploads, window.cursor_position()) {
-        return;
-    }
-    let Some(world) = cursor_world(&window, *camera) else {
+    let Some(world) = world else {
         return;
     };
     pasting.0 = Some((clipboard.fetch_text(), world));
@@ -219,6 +228,7 @@ pub(super) fn pasted_nodes(
     frames: Res<FrameCount>,
     mut pasting: ResMut<Pasting>,
     mut document: ResMut<Document>,
+    mut reselect: ResMut<Reselect>,
 ) {
     let Some((read, world)) = pasting.0.as_mut() else {
         return;
@@ -230,8 +240,11 @@ pub(super) fn pasted_nodes(
     pasting.0 = None;
     match text {
         Ok(text) => {
-            if pasted(&mut document.0, frames.0, &text, world).is_empty() {
+            let ids = pasted(&mut document.0, frames.0, &text, world);
+            if ids.is_empty() {
                 info!("paste: the clipboard holds no canvas nodes");
+            } else {
+                reselect.0 = Some(ids);
             }
         }
         Err(e) => warn!("paste: {e}"),
