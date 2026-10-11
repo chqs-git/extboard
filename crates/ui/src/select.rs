@@ -448,7 +448,6 @@ mod tests {
             "empty canvas: the edge is all there is"
         );
         assert!(tries_the_edge(Some((&group, -0.2)), -0.5));
-        // Its own front end is the card at its depth, and the edge is over it.
         assert!(tries_the_edge(Some((&card, -0.5)), -0.5));
         assert!(!tries_the_edge(Some((&card, -0.2)), -0.5));
     }

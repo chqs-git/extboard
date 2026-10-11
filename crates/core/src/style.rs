@@ -107,8 +107,6 @@ pub fn set_align(extra: &mut Map<String, Value>, align: Option<usize>) {
     };
 }
 
-// How an edge's line is drawn. Solid is written as no key, since every edge
-// drew that way before this existed.
 pub const DASHES: [&str; 3] = ["solid", "dashed", "dotted"];
 pub const SOLID: usize = 0;
 

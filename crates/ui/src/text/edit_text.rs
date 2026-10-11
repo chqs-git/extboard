@@ -333,7 +333,6 @@ fn opened(
                     .map(|_| edge.0.clone())
             })
         });
-    // An edge stacked over the node takes the click, as it does a single one.
     let over = |depth: f32| {
         edge.as_deref()
             .and_then(|id| edge_depth(canvas, id))

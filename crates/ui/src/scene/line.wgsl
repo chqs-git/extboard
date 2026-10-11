@@ -1,18 +1,12 @@
 #import bevy_ui::ui_vertex_output::UiVertexOutput
 
-// The box is the edge laid flat, `a` on the left and `b` on the right, and the
-// node's rotation stands it back up.
 struct Line {
     color: vec4<f32>,
-    // Canvas units, `a` to `b`: the laid-out width over this is the zoom.
     length: f32,
-    // Screen pixels, at every zoom.
+    // Screen pixels; the rest are canvas units.
     shaft: f32,
-    // Half the gap around a label, in canvas units; zero for none.
     hole: f32,
-    // 0 solid, 1 dashed, 2 dotted.
     dash: f32,
-    // 1 where that end has an arrowhead: `a`, then `b`.
     heads: vec2<f32>,
     pad: vec2<f32>,
 }
@@ -20,11 +14,9 @@ struct Line {
 @group(1) @binding(0)
 var<uniform> line: Line;
 
-// Canvas units, so a head grows with the board the way its nodes do.
 const HEAD_LEN: f32 = 18.0;
 const HEAD_HALF_WIDTH: f32 = 8.0;
 
-// Signed distance to a head whose tip is at `tip` on the x axis, pointing +x.
 fn head(point: vec2<f32>, tip: f32, len: f32, half: f32) -> f32 {
     let base = tip - len - point.x;
     let side = (abs(point.y) * len + half * (point.x - tip)) / length(vec2<f32>(len, half));
@@ -43,8 +35,6 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
     let start = -end + line.heads.x * len;
     let stop = end - line.heads.y * len;
     var shaft = max(max(start - point.x, point.x - stop), abs(point.y) - w * 0.5);
-    // From the shaft's own start, so the pattern begins on a dash. Its spacing is
-    // in canvas units, so it grows with the board; the dots stay the shaft's width.
     let along = point.x - start;
     let unit = w * zoom;
     if line.dash > 1.5 {

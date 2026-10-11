@@ -11,7 +11,6 @@ pub struct LineMaterial {
     pub paint: LinePaint,
 }
 
-// See line.wgsl for the units; the pad makes it a round forty-eight bytes.
 #[derive(ShaderType, Clone, Copy, Debug, PartialEq, Default)]
 pub struct LinePaint {
     pub color: Vec4,

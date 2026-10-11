@@ -22,17 +22,13 @@ use line::{LineMaterial, LinePaint};
 pub const LABEL_SIZE: f32 = 12.0;
 // The shaft at the middle stroke weight, in screen pixels.
 const SHAFT: f32 = 3.0;
-// Room around the drawn line for its anti-aliased rim.
 const RIM_PX: f32 = 2.0;
 
 pub struct ScenePlugin;
 
-// The edge as the board's logic sees it: selected, hit, and on its midpoint.
-// What is drawn is the `EdgeLine` and `EdgeLabel` that share its id.
 #[derive(Component)]
 pub struct EdgeId(pub String);
 
-// The label's box in canvas units, measured off its laid-out text.
 #[derive(Component, Default)]
 pub struct LabelSize(pub Vec2);
 
@@ -45,7 +41,6 @@ struct EdgeLabel(String);
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
         line::register(app);
-        // The edge being drawn is still a gizmo, at the weight it will land at.
         app.insert_gizmo_config(
             DefaultGizmoConfigGroup,
             GizmoConfig {
@@ -75,7 +70,6 @@ impl Plugin for ScenePlugin {
             )
                 .chain(),
         )
-        // Where the node panels are tracked, and for the same reasons.
         .add_systems(
             PostUpdate,
             (track_lines, track_labels)
@@ -144,7 +138,6 @@ fn spawn_edges(
         if edge.label.is_some() {
             spawned.insert(LabelSize::default());
         }
-        // One material each: the uniforms are the edge's own geometry.
         commands.spawn((
             EdgeLine(edge.id.clone()),
             Node {
@@ -159,8 +152,6 @@ fn spawn_edges(
         ));
         if let Some(label) = &edge.label {
             let face = theme.face(None, style::text_color(&edge.extra));
-            // Laid out `raster` times too big and scaled back down, like the
-            // node panels, so the glyphs stay sharp under the zoom.
             commands.spawn((
                 EdgeLabel(edge.id.clone()),
                 Text::new(interpolate(label, document.0.vars()).into_owned()),
@@ -243,7 +234,6 @@ fn track_lines(
             continue;
         };
         let length = a.distance(b);
-        // Two nodes touching leave no line to draw, and no direction to draw it in.
         let want = if length < f32::EPSILON {
             Visibility::Hidden
         } else {
@@ -305,8 +295,6 @@ fn track_lines(
     }
 }
 
-// The label rides the edge's midpoint at the camera's zoom, and its laid-out
-// size goes back to the edge, for the gap in the line and for a click.
 #[allow(clippy::type_complexity, reason = "a system's arguments are its query")]
 fn track_labels(
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
@@ -347,7 +335,6 @@ fn track_labels(
         if (node.left, node.top) != (px(screen.x), px(screen.y)) {
             (node.left, node.top) = (px(screen.x), px(screen.y));
         }
-        // Back onto its own centre, then down from the raster tier to the zoom.
         let want = UiTransform {
             translation: Val2::percent(-50.0, -50.0),
             scale: Vec2::splat(zoom / raster.0),

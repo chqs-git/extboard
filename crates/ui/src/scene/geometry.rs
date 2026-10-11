@@ -53,21 +53,16 @@ pub(super) fn edge_ends(
     (to_world(Vec2::from(a)), to_world(Vec2::from(b)))
 }
 
-// The higher of its two ends in the board's order: an edge is drawn just over
-// the front one, so it runs across what is behind it and under what is ahead.
 pub(super) fn rank(canvas: &Canvas, edge: &extboard_core::Edge) -> Option<usize> {
     let index = |id: &str| canvas.nodes.iter().position(|node| node.id == id);
     Some(index(&edge.from_node)?.max(index(&edge.to_node)?))
 }
 
-// Where the edge sits among the node depths, for a click to weigh it against
-// the node under it.
 pub fn edge_depth(canvas: &Canvas, id: &str) -> Option<f32> {
     let edge = canvas.edges.iter().find(|edge| edge.id == id)?;
     Some(crate::node::depth(rank(canvas, edge)?, canvas.nodes.len()))
 }
 
-// Whether any of the segment lies in the rect: clipped against each slab in turn.
 pub fn crosses(rect: Rect, a: Vec2, b: Vec2) -> bool {
     let span = b - a;
     let (mut low, mut high) = (0.0_f32, 1.0_f32);

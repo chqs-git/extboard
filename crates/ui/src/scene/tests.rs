@@ -124,7 +124,6 @@ fn a_band_catches_an_edge_it_crosses_even_with_both_ends_outside() {
     let band = Rect::from_corners(Vec2::new(-10.0, -10.0), Vec2::new(10.0, 10.0));
     assert!(crosses(band, Vec2::new(-50.0, 0.0), Vec2::new(50.0, 0.0)));
     assert!(crosses(band, Vec2::new(0.0, 0.0), Vec2::new(50.0, 50.0)));
-    // Beside it, and a diagonal that cuts past the corner.
     assert!(!crosses(
         band,
         Vec2::new(-50.0, 20.0),
