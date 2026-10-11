@@ -123,12 +123,12 @@ struct NewName;
 // no hue left to read: without it, dragging into the corner loses the one the
 // plane was showing.
 #[derive(Resource, Default)]
-struct Picking(Option<Picked>);
+pub(crate) struct Picking(Option<Picked>);
 
 // Which text has its font list open. The two never open together: the panel
 // grows downwards and one tall thing below the sections is enough.
 #[derive(Resource, Default)]
-struct Targeting(Option<usize>);
+pub(crate) struct Targeting(Option<usize>);
 
 #[derive(Clone, Copy)]
 struct Picked {
@@ -225,6 +225,7 @@ impl Plugin for ThemePlugin {
         // into. Headless -- a test -- gets the panel's logic and no picture.
         app.init_asset::<DialMaterial>();
         embedded_asset!(app, "JetBrainsMono-Regular.ttf");
+        embedded_asset!(app, "Twemoji.Mozilla.ttf");
         if app.get_sub_app(RenderApp).is_some() {
             embedded_asset!(app, "picker.wgsl");
             app.add_plugins(UiMaterialPlugin::<DialMaterial>::default());
@@ -237,6 +238,11 @@ impl Plugin for ThemePlugin {
             .init_resource::<Naming>()
             .init_resource::<Picking>()
             .init_resource::<Targeting>()
+            .add_systems(Startup, load_emoji)
+            .add_systems(
+                Update,
+                map_emoji.run_if(resource_exists::<FontCx>.and_then(unmapped)),
+            )
             .add_systems(
                 Update,
                 (
@@ -517,6 +523,48 @@ fn family_of(font_cx: &mut FontCx, font: &Font) -> Option<String> {
     font_cx.collection.family_name(family).map(str::to_owned)
 }
 
+// The handle lives as long as the app: bevy rebuilds its font collection from
+// the live assets, and the emoji mapping it restores needs this one among them.
+#[derive(Resource)]
+struct Emoji {
+    font: Handle<Font>,
+    mapped: bool,
+}
+
+fn load_emoji(mut commands: Commands, assets: Res<AssetServer>) {
+    let path =
+        AssetPath::from_path_buf(embedded_path!("Twemoji.Mozilla.ttf")).with_source("embedded");
+    commands.insert_resource(Emoji {
+        font: assets.load(path),
+        mapped: false,
+    });
+}
+
+fn unmapped(emoji: Option<Res<Emoji>>) -> bool {
+    emoji.is_some_and(|emoji| !emoji.mapped)
+}
+
+// One font for every platform: a browser has no system emoji to fall back on.
+fn map_emoji(
+    assets: Res<Assets<Font>>,
+    mut font_cx: ResMut<FontCx>,
+    mut emoji: ResMut<Emoji>,
+    mut theme: ResMut<Theme>,
+) {
+    let Some(family) = assets
+        .get(emoji.font.id())
+        .and_then(|font| family_of(&mut font_cx, font))
+    else {
+        return;
+    };
+    if let Err(err) = font_cx.set_emoji_family(&family) {
+        warn!("emoji font {family}: {err}");
+    }
+    emoji.mapped = true;
+    // Text laid out before the mapping fell back to nothing; this respawns it.
+    theme.set_changed();
+}
+
 fn repaint(theme: Res<Theme>, mut clear: ResMut<ClearColor>) {
     let want = theme.color(extboard_core::BACKGROUND);
     if clear.0 != want {
@@ -524,21 +572,25 @@ fn repaint(theme: Res<Theme>, mut clear: ResMut<ClearColor>) {
     }
 }
 
-fn toggle(
-    keys: Res<ButtonInput<KeyCode>>,
+fn toggle(keys: Res<ButtonInput<KeyCode>>, mut commands: Commands) {
+    if command(&keys) && keys.just_pressed(KeyCode::KeyT) {
+        commands.run_system_cached(flip);
+    }
+}
+
+// Ctrl-T, and the context menu's row.
+pub(crate) fn flip(
     mut open: ResMut<Open>,
     mut picking: ResMut<Picking>,
     mut targeting: ResMut<Targeting>,
     mut sidebar: ResMut<Sidebar>,
 ) {
-    if command(&keys) && keys.just_pressed(KeyCode::KeyT) {
-        open.0 = !open.0;
-        picking.0 = None;
-        targeting.0 = None;
-        // Both live on the right edge, so the one being opened puts the other
-        // away rather than drawing over it.
-        sidebar.open &= !open.0;
-    }
+    open.0 = !open.0;
+    picking.0 = None;
+    targeting.0 = None;
+    // Both live on the right edge, so the one being opened puts the other
+    // away rather than drawing over it.
+    sidebar.open &= !open.0;
 }
 
 // Ctrl-S is the save button. Undo is not here: a theme edit is an ordinary

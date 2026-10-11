@@ -73,6 +73,8 @@ pub(super) struct Opened(pub(super) Option<Row>);
 pub(super) struct Paint {
     pub(super) names: Option<String>,
     pub(super) code: String,
+    // The slot the row draws with no key.
+    pub(super) fallback: usize,
 }
 
 // The panel is respawned when any of this changes and left alone otherwise, so
@@ -107,9 +109,9 @@ struct Align(usize);
 #[derive(Component)]
 struct Restack(Depth);
 
-// A row of an open list: a palette slot, or none of them.
+// A row of an open list: what picking it writes, no key for the row's default.
 #[derive(Component)]
-struct Slot(Option<usize>);
+struct Slot(Option<String>);
 
 #[derive(Component)]
 struct Role(usize);
@@ -200,6 +202,7 @@ pub(super) fn shown(
     let painted = |color: Option<&str>, fallback| Paint {
         names: color.map(str::to_owned),
         code: code(theme.paint(color, fallback)),
+        fallback,
     };
     let (extra, outline, background, sides) = match &target {
         Target::Node(id) => {
@@ -554,23 +557,23 @@ fn candidates(
                 Row::Background => background.as_ref().unwrap_or(outline),
                 _ => outline,
             };
-            // The palette's own colour first, which is what no key at all draws.
-            for slot in std::iter::once(None).chain((0..theme.live.colors.len()).map(Some)) {
-                let on = match slot {
-                    Some(slot) => paint.names.as_deref() == Some(slot_value(theme, slot).as_str()),
-                    None => paint.names.is_none(),
-                };
-                let label = slot.map_or_else(|| "theme".to_owned(), Block::role);
-                let swatch = slot.map_or(paint.code.clone(), |slot| code(theme.color(slot)));
+            for slot in 0..theme.live.colors.len() {
+                let value = (slot != paint.fallback).then(|| slot_value(theme, slot));
+                let on = paint
+                    .names
+                    .as_deref()
+                    .map_or(slot == paint.fallback, |names| {
+                        names == slot_value(theme, slot)
+                    });
                 parent
                     .spawn((
-                        Slot(slot),
+                        Slot(value),
                         Node {
                             column_gap: px(6.0),
                             ..row()
                         },
                         BackgroundColor(row_bg(on)),
-                        children![dot(&swatch), tag(&label, FG)],
+                        children![dot(&code(theme.color(slot))), tag(&Block::role(slot), FG)],
                     ))
                     .observe(pick_slot);
             }
@@ -619,10 +622,10 @@ impl Row {
 }
 
 // What the chip reads: the role a slot spells, a literal colour as itself, and
-// the palette's own word for a row naming nothing.
+// the row's default role for a row naming nothing.
 fn name_of(paint: &Paint) -> String {
     match paint.names.as_deref() {
-        None => "theme".to_owned(),
+        None => Block::role(paint.fallback),
         Some(color) => match color.parse::<usize>() {
             Ok(slot) => Block::role(slot),
             Err(_) => color.to_owned(),
@@ -733,7 +736,6 @@ fn pick_slot(
     press: On<Pointer<Press>>,
     rows: Query<&Slot>,
     panels: Query<&ConfigPanel>,
-    theme: Res<Theme>,
     mut opened: ResMut<Opened>,
     mut document: ResMut<Document>,
 ) {
@@ -741,8 +743,7 @@ fn pick_slot(
     else {
         return;
     };
-    let value = slot.0.map(|slot| slot_value(&theme, slot));
-    set_color(&mut document, &panel.target, row, value.as_deref());
+    set_color(&mut document, &panel.target, row, slot.0.as_deref());
     opened.0 = None;
 }
 

@@ -885,17 +885,20 @@ fn lock(pending: &Arc<Mutex<Pending>>) -> std::sync::MutexGuard<'_, Pending> {
     pending.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn toggle_sidebar(
-    keys: Res<ButtonInput<KeyCode>>,
+fn toggle_sidebar(keys: Res<ButtonInput<KeyCode>>, mut commands: Commands) {
+    // A node's own editor owns the keyboard: ctrl-E there is a keystroke, and in
+    // ours escape is what ends the session before the panel can be put away.
+    if command(&keys) && keys.just_pressed(KeyCode::KeyE) {
+        commands.run_system_cached(flip_sidebar);
+    }
+}
+
+// Ctrl-E, and the context menu's row.
+pub(crate) fn flip_sidebar(
     document: Res<Document>,
     mut sidebar: ResMut<Sidebar>,
     mut theme: ResMut<crate::theme::Open>,
 ) {
-    // A node's own editor owns the keyboard: ctrl-E there is a keystroke, and in
-    // ours escape is what ends the session before the panel can be put away.
-    if !command(&keys) || !keys.just_pressed(KeyCode::KeyE) {
-        return;
-    }
     sidebar.open = !sidebar.open;
     if !sidebar.open {
         return;
@@ -1380,8 +1383,13 @@ fn row() -> impl Bundle {
     )
 }
 
+// Back from the list, which has nowhere further back to go, puts the panel away.
 fn go_list(_press: On<Pointer<Press>>, mut sidebar: ResMut<Sidebar>) {
-    sidebar.view = View::List;
+    if sidebar.view == View::List {
+        sidebar.open = false;
+    } else {
+        sidebar.view = View::List;
+    }
 }
 
 fn go_editor(_press: On<Pointer<Press>>, mut sidebar: ResMut<Sidebar>) {

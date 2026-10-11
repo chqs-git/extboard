@@ -641,3 +641,15 @@ fn a_light_enough_font_file_is_a_pixel_font_and_stops_the_smoothing() {
     theme.loaded[0].bytes = Some(PIXEL_BYTES);
     assert_eq!(theme.smoothing(), FontSmoothing::AntiAliased);
 }
+
+#[test]
+fn the_embedded_emoji_font_becomes_the_emoji_family() {
+    let font = Font::from_bytes(include_bytes!("Twemoji.Mozilla.ttf").to_vec());
+    let mut font_cx = FontCx::default();
+    let family = family_of(&mut font_cx, &font).expect("a font with a family name");
+    font_cx.set_emoji_family(&family).expect("an emoji family");
+    assert_eq!(
+        font_cx.get_family(&FontSource::Emoji),
+        Some(family.as_str())
+    );
+}

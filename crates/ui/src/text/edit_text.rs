@@ -1,21 +1,37 @@
 use bevy::input_focus::{AutoFocus, InputFocus};
 use bevy::prelude::*;
-use bevy::text::{EditableText, TextCursorStyle};
-use extboard_core::{BACKGROUND, Canvas, NodeKind};
+use bevy::text::{EditableText, FontSize, TextCursorStyle, TextEdit, TextLayoutInfo};
+use extboard_core::{Canvas, NodeKind};
 
 use crate::camera::world_to_screen;
 use crate::client::Document;
-use crate::edit::double_click;
+use crate::edit::{command, double_click};
 use crate::node::{NodeId, NodeRect};
-use crate::scene::{EdgeId, nearest};
+use crate::scene::{EdgeId, LABEL_SIZE, label_box, nearest};
 use crate::select::{EDGE_PX, bounds, cursor_world, pick};
-use crate::theme::{Face, Theme};
+use crate::theme::Face;
 
-use super::{BODY, WELL, markdown};
+use super::{BODY, markdown};
 
-// The label editor is a fixed screen-sized box on the edge's midpoint: a label
-// is one short line, and it stays legible at every zoom.
+// How far from the midpoint a click still counts as being in the label, and the
+// width the one line it holds is centred in.
 const LABEL_BOX: Vec2 = Vec2::new(180.0, 28.0);
+
+// bevy's own default, and what the line the editor lays out will measure.
+pub(super) const LINE_HEIGHT: f32 = 1.2;
+
+// The label is drawn in the world, so the zoom is the size it reads on screen.
+// Whole pixels: the glyph atlas keeps one set per size, and a ramp through the
+// fractions between 13 and 14 buys nothing anybody can see.
+pub(super) fn label_size(zoom: f32) -> f32 {
+    (LABEL_SIZE * zoom).round().max(1.0)
+}
+
+// The editor's box: one line tall, so it lands over the label rather than near
+// it, in a width the line is centred in.
+fn label_half(size: f32) -> Vec2 {
+    Vec2::new(LABEL_BOX.x, size * LINE_HEIGHT) / 2.0
+}
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Target {
@@ -34,8 +50,10 @@ pub struct Editing(pub Option<Target>);
 #[derive(Component)]
 pub(super) struct Editor;
 
+// Half the editor's own box, so `track_label` can centre it on the midpoint
+// without measuring a layout that is a frame behind.
 #[derive(Component)]
-pub(super) struct LabelBox;
+pub(super) struct LabelBox(Vec2);
 
 pub fn editing(editing: Res<Editing>) -> bool {
     editing.0.is_some()
@@ -49,7 +67,8 @@ impl Editing {
         }
     }
 
-    pub(super) fn edge(&self) -> Option<&str> {
+    // `scene` reads it too: the drawn label stands down for the editor.
+    pub fn edge(&self) -> Option<&str> {
         match &self.0 {
             Some(Target::Edge(id)) => Some(id),
             _ => None,
@@ -57,22 +76,32 @@ impl Editing {
     }
 }
 
-pub(super) fn label_editor(label: &str, theme: &Theme, face: &Face) -> impl Bundle {
+// The label typed where it is drawn: the drawn label's own size, so the text
+// does not change under the caret, and no well or padding to read as a form
+// over the edge. `track_label` keeps all of it on the camera.
+pub(super) fn label_editor(label: &str, face: &Face, zoom: f32) -> impl Bundle {
+    let size = label_size(zoom);
+    let half = label_half(size);
     (
         Editor,
-        LabelBox,
+        LabelBox(half),
         Node {
             position_type: PositionType::Absolute,
-            width: px(LABEL_BOX.x),
-            padding: UiRect::all(px(4.0)),
+            width: px(half.x * 2.0),
+            height: px(half.y * 2.0),
             ..default()
         },
-        BackgroundColor(theme.color(BACKGROUND).with_alpha(WELL)),
         EditableText::new(label),
+        // Centred on the midpoint the label sits on, and unwrapped, so it grows
+        // out of that point in both directions the way the drawn label does.
+        TextLayout {
+            justify: bevy::text::Justify::Center,
+            linebreak: LineBreak::NoWrap,
+        },
         TextFont {
             font: face.source.clone(),
             font_smoothing: face.smoothing,
-            ..TextFont::from_font_size(BODY)
+            ..TextFont::from_font_size(size)
         },
         TextColor(face.ink),
         TextCursorStyle {
@@ -83,14 +112,20 @@ pub(super) fn label_editor(label: &str, theme: &Theme, face: &Face) -> impl Bund
     )
 }
 
-// The box rides the edge's midpoint, which scene.rs keeps current every frame.
+// The box rides the edge's midpoint, which scene.rs keeps current every frame,
+// and the camera's zoom: a label the board scales away from is the same thing
+// card 106 fixed for a node's text.
 pub(super) fn track_label(
     editing: Res<Editing>,
-    camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     edges: Query<(&EdgeId, &Transform)>,
-    mut boxes: Query<&mut Node, With<LabelBox>>,
+    mut boxes: Query<(&mut LabelBox, &mut Node, &mut TextFont)>,
 ) {
-    let (camera, cam_global) = *camera;
+    let (camera, cam_global, projection) = *camera;
+    let Projection::Orthographic(ortho) = projection else {
+        return;
+    };
+    let size = label_size(1.0 / ortho.scale);
     let Some(screen) = editing
         .edge()
         .and_then(|id| edges.iter().find(|(edge, _)| edge.0 == id))
@@ -100,11 +135,14 @@ pub(super) fn track_label(
     else {
         return;
     };
-    let want = (
-        px(screen.x - LABEL_BOX.x / 2.0),
-        px(screen.y - LABEL_BOX.y / 2.0),
-    );
-    for mut node in &mut boxes {
+    let half = label_half(size);
+    for (mut box_, mut node, mut font) in &mut boxes {
+        if box_.0 != half {
+            box_.0 = half;
+            (node.width, node.height) = (px(half.x * 2.0), px(half.y * 2.0));
+            font.font_size = FontSize::Px(size);
+        }
+        let want = (px(screen.x - half.x), px(screen.y - half.y));
         if (node.left, node.top) != want {
             (node.left, node.top) = want;
         }
@@ -132,13 +170,22 @@ pub(super) fn release_field(
 }
 
 // Source while editing, rendered at rest: the buffer is the node's raw markdown,
-// and the styled span tree is never edited.
-pub(super) fn editor(md: &str, face: &Face, raster: f32) -> impl Bundle {
-    let buffer = EditableText {
-        allow_newlines: true,
-        // The node's own height, not a line count.
-        visible_lines: None,
-        ..EditableText::new(md)
+// and the styled span tree is never edited. `live` is the buffer of a session
+// this respawn interrupts, which the document does not hold yet.
+pub(super) fn editor(
+    md: &str,
+    face: &Face,
+    raster: f32,
+    live: Option<&EditableText>,
+) -> impl Bundle {
+    let buffer = match live {
+        Some(live) => live.clone(),
+        None => EditableText {
+            allow_newlines: true,
+            // The node's own height, not a line count.
+            visible_lines: None,
+            ..EditableText::new(md)
+        },
     };
 
     (
@@ -182,7 +229,7 @@ pub(super) fn toggle(
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(&NodeId, &Transform, &NodeRect)>,
-    edges: Query<(&EdgeId, &Transform)>,
+    edges: Query<(&EdgeId, &Transform, Option<&TextLayoutInfo>)>,
     editors: Query<&EditableText, With<Editor>>,
     buffers: Query<&EditableText, With<crate::script::ScriptBuffer>>,
     sidebar: Res<crate::script::Sidebar>,
@@ -197,7 +244,10 @@ pub(super) fn toggle(
     };
 
     if let Some(target) = editing.0.clone() {
+        // Space+left is the camera's pan grab, the same press the opening path
+        // stands down for: panning a board is not a click away from the caret.
         let away = buttons.just_pressed(MouseButton::Left)
+            && !keys.pressed(KeyCode::Space)
             && !holds(
                 &target,
                 &nodes,
@@ -206,7 +256,11 @@ pub(super) fn toggle(
                 &window,
                 world,
             );
-        if !away && !keys.just_pressed(KeyCode::Escape) {
+        // Enter finishes a one-line field, and a label is one; node text and a
+        // script take newlines, so there it is a newline and nothing more.
+        let entered = matches!(target, Target::Edge(_))
+            && keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter]);
+        if !away && !entered && !keys.just_pressed(KeyCode::Escape) {
             return;
         }
         // The sidebar's buffer is not a node's editor, and both can be alive at
@@ -246,14 +300,17 @@ pub(super) fn toggle(
     if !double_click(&mut last, time.elapsed_secs(), screen) {
         return;
     }
-    editing.0 = opened(&document.0, &nodes, world, EDGE_PX * ortho.scale);
+    editing.0 = opened(&document.0, &nodes, &edges, world, EDGE_PX * ortho.scale);
 }
 
-// A node under the cursor opens its markdown; failing that, an edge under it
-// opens its label. Only a text node has markdown to edit.
+// A node under the cursor opens its markdown; failing that, an edge near it, or
+// one whose label the cursor is in, opens its label. Only a text node has
+// markdown to edit, and a node without it — a group around the edge, an image
+// under it — does not swallow the click.
 fn opened(
     canvas: &Canvas,
     nodes: &Query<(&NodeId, &Transform, &NodeRect)>,
+    edges: &Query<(&EdgeId, &Transform, Option<&TextLayoutInfo>)>,
     world: Vec2,
     reach: f32,
 ) -> Option<Target> {
@@ -263,14 +320,24 @@ fn opened(
             .map(|(id, transform, rect)| (&id.0, bounds(transform, rect), transform.translation.z)),
         world,
     );
-    if let Some(id) = node {
-        return canvas
+    if let Some(id) = node.filter(|id| {
+        canvas
             .nodes
             .iter()
-            .any(|node| &node.id == id && markdown(node).is_some())
-            .then(|| Target::Node(id.clone()));
+            .any(|node| &node.id == *id && markdown(node).is_some())
+    }) {
+        return Some(Target::Node(id.clone()));
     }
-    nearest(canvas, world, reach).map(|id| Target::Edge(id.to_owned()))
+    nearest(canvas, world, reach)
+        .map(str::to_owned)
+        .or_else(|| {
+            edges.iter().find_map(|(edge, at, label)| {
+                label
+                    .filter(|label| label_box(at, label).contains(world))
+                    .map(|_| edge.0.clone())
+            })
+        })
+        .map(Target::Edge)
 }
 
 // Whether the press is still inside what is being edited: the node's rect, or
@@ -278,7 +345,7 @@ fn opened(
 fn holds(
     target: &Target,
     nodes: &Query<(&NodeId, &Transform, &NodeRect)>,
-    edges: &Query<(&EdgeId, &Transform)>,
+    edges: &Query<(&EdgeId, &Transform, Option<&TextLayoutInfo>)>,
     camera: (&Camera, &GlobalTransform),
     window: &Window,
     world: Option<Vec2>,
@@ -294,8 +361,8 @@ fn holds(
             let Some((cursor, at)) = window.cursor_position().zip(
                 edges
                     .iter()
-                    .find(|(edge, _)| edge.0 == *id)
-                    .and_then(|(_, transform)| {
+                    .find(|(edge, _, _)| edge.0 == *id)
+                    .and_then(|(_, transform, _)| {
                         world_to_screen(camera.0, camera.1, transform.translation.truncate())
                     }),
             ) else {
@@ -342,5 +409,19 @@ pub(super) fn written_back(canvas: &mut Canvas, target: &Target, text: &str) -> 
             true
         }
         Target::Script(name) => crate::script::set_script(canvas, name, text),
+    }
+}
+
+// bevy binds select-all to Cmd alone on a Mac, so Ctrl-A there did nothing.
+pub(super) fn select_all(
+    keys: Res<ButtonInput<KeyCode>>,
+    focus: Res<InputFocus>,
+    mut fields: Query<&mut EditableText>,
+) {
+    if !command(&keys) || !keys.just_pressed(KeyCode::KeyA) {
+        return;
+    }
+    if let Some(mut field) = focus.get().and_then(|entity| fields.get_mut(entity).ok()) {
+        field.queue_edit(TextEdit::SelectAll);
     }
 }

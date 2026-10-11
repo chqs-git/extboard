@@ -1,6 +1,8 @@
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::input::touch::Touches;
+use bevy::picking::hover::HoverMap;
 use bevy::prelude::*;
+use bevy::ui_widgets::ScrollArea;
 use extboard_core::{Canvas, Node as CanvasNode};
 
 use crate::client::{Document, Rev, Space};
@@ -157,8 +159,15 @@ fn zoom(
     time: Res<Time>,
     window: Single<&Window>,
     camera: Single<(&mut Transform, &mut Projection, &mut ZoomTarget), With<Camera2d>>,
+    hovers: Res<HoverMap>,
+    lists: Query<(), With<ScrollArea>>,
+    parents: Query<&ChildOf>,
 ) {
     let (mut transform, mut projection, mut target) = camera.into_inner();
+    // The wheel over a dropdown is that list's to scroll.
+    let over_list = hovers.values().flat_map(|hits| hits.keys()).any(|&hit| {
+        lists.contains(hit) || parents.iter_ancestors(hit).any(|up| lists.contains(up))
+    });
     let Projection::Orthographic(ortho) = &mut *projection else {
         return;
     };
@@ -167,7 +176,7 @@ fn zoom(
         MouseScrollUnit::Line => scroll.delta.y,
         MouseScrollUnit::Pixel => scroll.delta.y / 50.0,
     };
-    if notches != 0.0 {
+    if notches != 0.0 && !over_list {
         target.0 = (target.0 * ZOOM_PER_NOTCH.powf(-notches)).clamp(ZOOM_MIN, ZOOM_MAX);
     }
 

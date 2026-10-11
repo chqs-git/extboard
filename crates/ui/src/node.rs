@@ -15,6 +15,10 @@ pub struct Respawn;
 #[derive(Component)]
 pub struct NodeId(pub String);
 
+// Ids the next respawn selects in place of the selection it would carry over.
+#[derive(Resource, Default)]
+pub struct Reselect(pub Option<Vec<String>>);
+
 #[derive(Component)]
 pub struct NodeRect {
     pub w: i64,
@@ -38,7 +42,7 @@ impl NodeKind {
 
 impl Plugin for NodePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_resource::<Reselect>().add_systems(
             Update,
             (
                 spawn_nodes
@@ -58,11 +62,13 @@ pub fn to_canvas(center: Vec2, size: Vec2) -> Vec2 {
     to_world(center) - size / 2.0
 }
 
-fn spawn_nodes(
+pub(crate) fn spawn_nodes(
     mut commands: Commands,
     document: Res<Document>,
+    mut reselect: ResMut<Reselect>,
     existing: Query<(Entity, &NodeId, Has<Selected>)>,
 ) {
+    let fresh = reselect.0.take();
     // The selection is carried across, or a tick script's write takes it.
     let mut selected: Vec<&str> = Vec::new();
     for (entity, id, picked) in &existing {
@@ -70,6 +76,9 @@ fn spawn_nodes(
             selected.push(id.0.as_str());
         }
         commands.entity(entity).despawn();
+    }
+    if let Some(ids) = &fresh {
+        selected = ids.iter().map(String::as_str).collect();
     }
 
     // The model of a node, not its picture: for hit testing and for the panel.
@@ -183,6 +192,38 @@ mod tests {
         extboard_core::NodeKind::Text {
             text: String::new(),
         }
+    }
+
+    // A paste moves the selection onto what it made, off whatever it was on.
+    #[test]
+    fn a_reselect_replaces_the_selection_the_respawn_carries() {
+        let mut app = App::new();
+        app.add_plugins(NodePlugin);
+        let mut canvas = extboard_core::Canvas::default();
+        canvas.add_node(node(text(), None)).unwrap();
+        app.insert_resource(Document(canvas));
+        app.update();
+        let old = app.world_mut().query::<Entity>().iter(app.world()).next();
+        app.world_mut().entity_mut(old.unwrap()).insert(Selected);
+
+        let mut pasted = node(text(), None);
+        pasted.id = "p".to_owned();
+        app.world_mut()
+            .resource_mut::<Document>()
+            .0
+            .add_node(pasted)
+            .unwrap();
+        app.world_mut().resource_mut::<Reselect>().0 = Some(vec!["p".to_owned()]);
+        app.update();
+
+        let selected: Vec<String> = app
+            .world_mut()
+            .query_filtered::<&NodeId, With<Selected>>()
+            .iter(app.world())
+            .map(|id| id.0.clone())
+            .collect();
+        assert_eq!(selected, ["p"]);
+        assert!(app.world().resource::<Reselect>().0.is_none(), "spent once");
     }
 
     fn themed(colors: &[&str]) -> Theme {

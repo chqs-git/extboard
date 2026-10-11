@@ -1,11 +1,12 @@
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
+use bevy::text::TextLayoutInfo;
 
 use crate::camera::{screen_to_world, world_to_screen};
 use crate::client::Document;
 use crate::edit::{MIN_SIZE, Reach, TIP_PX, anchor_under, created, rects, tip_under};
 use crate::node::{NodeKind, NodeRect};
-use crate::scene::{EdgeId, nearest};
+use crate::scene::{EdgeId, label_box, nearest};
 
 // A selected edge is painted with it in scene.rs, and a selected node's panel
 // outlined with it in text/panel.rs.
@@ -28,6 +29,17 @@ pub struct SelectPlugin;
 
 #[derive(Component)]
 pub struct Selected;
+
+// The context menu's "select all": every node and edge on the board.
+pub fn select_all(
+    mut commands: Commands,
+    nodes: Query<Entity, With<NodeRect>>,
+    edges: Query<Entity, With<EdgeId>>,
+) {
+    for entity in nodes.iter().chain(&edges) {
+        commands.entity(entity).insert(Selected);
+    }
+}
 
 // The frame a press landed on a panel rather than on the board. Picking is what
 // stamps it, and it is read back in `Update`: a hit test of our own cannot do
@@ -130,7 +142,7 @@ fn press(
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(Entity, &Transform, &NodeRect)>,
     kinds: Query<&NodeKind>,
-    edges: Query<(Entity, &EdgeId)>,
+    edges: Query<(Entity, &EdgeId, &Transform, Option<&TextLayoutInfo>)>,
     document: Option<Res<Document>>,
     selected: Query<Entity, With<Selected>>,
 ) {
@@ -173,9 +185,10 @@ fn press(
                 .and_then(|id| {
                     edges
                         .iter()
-                        .find(|(_, edge)| edge.0 == id)
-                        .map(|(entity, _)| entity)
+                        .find(|(_, edge, _, _)| edge.0 == id)
+                        .map(|(entity, _, _, _)| entity)
                 })
+                .or_else(|| label_at(&edges, world))
         })
         .flatten();
 
@@ -287,6 +300,19 @@ fn release(
         created(&mut document.0, frames.0, rect);
     }
     commands.remove_resource::<Band>();
+}
+
+// The edge whose label the cursor is in, for a click that landed on the text
+// rather than near the shaft it hangs off.
+fn label_at(
+    edges: &Query<(Entity, &EdgeId, &Transform, Option<&TextLayoutInfo>)>,
+    world: Vec2,
+) -> Option<Entity> {
+    edges.iter().find_map(|(entity, _, at, label)| {
+        label
+            .filter(|label| label_box(at, label).contains(world))
+            .map(|_| entity)
+    })
 }
 
 fn tries_the_edge(hit: Option<&NodeKind>) -> bool {

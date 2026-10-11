@@ -41,7 +41,7 @@ mod group;
 mod keys;
 
 pub use group::{in_group, ungrouped};
-pub use keys::duplicated;
+pub use keys::{PasteAt, duplicated};
 
 pub use keys::command;
 
@@ -116,6 +116,7 @@ impl Plugin for EditPlugin {
                 .chain(),
         );
         app.init_resource::<keys::Pasting>()
+            .init_resource::<PasteAt>()
             .init_resource::<drop::Uploads>()
             .add_systems(Update, drop::landed.run_if(resource_exists::<Document>));
         #[cfg(not(target_arch = "wasm32"))]
