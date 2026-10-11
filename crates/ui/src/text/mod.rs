@@ -61,13 +61,17 @@ fn raster_tier(zoom: f32) -> f32 {
 
 // An editor is clipped to its own content box, which bevy measures before the
 // panel's scale reaches it: a tier's slack then shaves the left and top off the
-// glyphs, so a session is laid out at the zoom it opens on and scaled by one.
-fn editing_raster(zoom: f32) -> f32 {
-    zoom.max(1.0)
+// glyphs, so a session is never scaled by more than one. Whole tiers only, and
+// never downward, so zooming through a session costs few respawns and no
+// stretch at either end of the ramp.
+fn session_raster(current: f32, zoom: f32) -> f32 {
+    current.max(zoom.max(1.0).ceil())
 }
 
-// Frozen while editing: a tier change respawns the panel, and a respawn would
-// reload the editor from the document and drop what has been typed into it.
+// A node's tier follows the camera up; `spawn_panels` carries the live buffer
+// across the respawn that costs. An edge label and a script are screen-sized
+// boxes that owe the zoom nothing, and a respawn would drop what was typed into
+// them, so their session leaves the tier alone.
 fn track_raster(
     camera: Single<&Projection, With<Camera2d>>,
     editing: Res<Editing>,
@@ -77,13 +81,12 @@ fn track_raster(
         return;
     };
     let zoom = 1.0 / ortho.scale;
-    if editing.0.is_some() {
-        if editing.is_changed() {
-            raster.set_if_neq(Raster(editing_raster(zoom)));
-        }
-        return;
-    }
-    raster.set_if_neq(Raster(raster_tier(zoom)));
+    let want = match &editing.0 {
+        Some(Target::Node(_)) => session_raster(raster.0, zoom),
+        Some(_) => return,
+        None => raster_tier(zoom),
+    };
+    raster.set_if_neq(Raster(want));
 }
 
 // Anything consuming a click before the editors see it orders itself before this.

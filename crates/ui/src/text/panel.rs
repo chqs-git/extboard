@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::text::EditableText;
 use extboard_core::{
     ACCENT, ACCENT_B, Node as CanvasNode, NodeKind, Vars, interpolate, is_image, sides_inset,
     space_path, style,
@@ -12,10 +13,17 @@ use crate::select::{OUTLINE, Selected};
 use crate::shape::{Palette, PolygonMaterial, paint};
 use crate::theme::{Face, Theme};
 
-use super::edit_text::{Editing, editor, label_editor};
+use super::edit_text::{Editing, Editor, LabelBox, editor, label_editor};
 use super::{GROUP_SIZE, PADDING, ROW_GAP, Raster, blocks, justify, markdown, spawn_blocks, wrap};
 
 const OUTLINE_PX: f32 = 2.0;
+
+// A filling image is laid out in the content box and drawn through the panel's
+// clip, and the two round to physical pixels independently: the seam between
+// them shows the node's own colour, and it flickers as either rounds under a
+// pan or a zoom. Overshooting the clip by a pixel on every side means the clip,
+// not the image, is what the edge of a node is.
+const BLEED_PX: f32 = 1.0;
 
 // UI rather than a mesh: the UI pass runs after the whole 2D world, so nothing
 // in the world can occlude a panel.
@@ -27,6 +35,10 @@ pub(super) struct Panel(String);
 // it in scale.
 #[derive(Component)]
 pub(super) struct Content(String);
+
+// Content drawn past the edge of its box, to be cut off by the panel's clip.
+#[derive(Component)]
+pub(super) struct Bleed;
 
 #[allow(
     clippy::too_many_arguments,
@@ -42,7 +54,11 @@ pub(super) fn spawn_panels(
     mut palette: ResMut<Palette>,
     mut materials: ResMut<Assets<PolygonMaterial>>,
     existing: Query<Entity, With<Panel>>,
+    live: Query<&EditableText, (With<Editor>, Without<LabelBox>)>,
 ) {
+    // A panel is rebuilt from the document, and the open editor's buffer is the
+    // one thing in one the document does not hold yet.
+    let carried = live.single().ok().cloned();
     for entity in &existing {
         commands.entity(entity).despawn();
     }
@@ -86,7 +102,7 @@ pub(super) fn spawn_panels(
                             top: px(0.0),
                             width: px(box_size.x),
                             height: px(box_size.y),
-                            padding: content_padding(node.sides, size, raster),
+                            padding: content_padding(Some(node), size, raster),
                             flex_direction: FlexDirection::Column,
                             row_gap: px(ROW_GAP * raster),
                             ..default()
@@ -100,6 +116,7 @@ pub(super) fn spawn_panels(
                             &assets,
                             raster,
                             document.0.vars(),
+                            carried.as_ref(),
                             parent,
                         )
                     });
@@ -118,6 +135,7 @@ fn inside(
     assets: &AssetServer,
     raster: f32,
     vars: &Vars,
+    carried: Option<&EditableText>,
     parent: &mut ChildSpawnerCommands,
 ) {
     let open = editing.node() == Some(node.id.as_str());
@@ -129,7 +147,7 @@ fn inside(
     );
     match (&node.kind, markdown(node)) {
         (_, Some(md)) if open => {
-            parent.spawn(editor(md, &face, raster));
+            parent.spawn(editor(md, &face, raster, carried));
         }
         (_, Some(md)) => spawn_blocks(
             &node.id,
@@ -144,9 +162,17 @@ fn inside(
         // The file is a path in the spaces dir, which is the asset root.
         (NodeKind::File { file, .. }, _) if is_image(file) => {
             parent.spawn((
-                ImageNode::new(assets.load(asset_path(file))),
+                Bleed,
+                ImageNode {
+                    image: assets.load(asset_path(file)),
+                    // The node box is the frame; resize it to crop.
+                    image_mode: NodeImageMode::Stretch,
+                    ..default()
+                },
+                // Sized by its insets alone, which `track_panels` sets to a
+                // pixel outside the box on every side.
                 Node {
-                    width: percent(100.0),
+                    position_type: PositionType::Absolute,
                     ..default()
                 },
             ));
@@ -174,10 +200,6 @@ fn inside(
     }
 }
 
-fn is_group(node: &CanvasNode) -> bool {
-    matches!(node.kind, NodeKind::Group { .. })
-}
-
 fn heading(text: &str, face: &Face, ink: Color, raster: f32) -> impl Bundle {
     (
         Text::new(text.to_owned()),
@@ -191,31 +213,60 @@ fn heading(text: &str, face: &Face, ink: Color, raster: f32) -> impl Bundle {
     )
 }
 
-fn content_padding(sides: Option<u8>, size: Vec2, raster: f32) -> UiRect {
-    let inset = sides_inset(sides);
+fn is_group(node: &CanvasNode) -> bool {
+    matches!(node.kind, NodeKind::Group { .. })
+}
+
+// Whether the node's content is drawn edge to edge rather than inside a margin.
+fn fills(node: &CanvasNode) -> bool {
+    matches!(&node.kind, NodeKind::File { file, .. } if is_image(file))
+}
+
+// An image is the node's whole face, so it gets no padding to sit inside.
+fn content_padding(node: Option<&CanvasNode>, size: Vec2, raster: f32) -> UiRect {
+    if node.is_some_and(fills) {
+        return UiRect::ZERO;
+    }
+    let inset = sides_inset(node.and_then(|node| node.sides));
     UiRect::axes(
         px((PADDING + inset * size.x) * raster),
         px((PADDING + inset * size.y) * raster),
     )
 }
 
-// Outside any panel: a fixed screen-sized box on an edge, not a node's body.
+// Outside any panel: a screen-space box over the edge's midpoint, not a node's
+// body. It despawns here too, so closing a session takes the editor off screen.
 pub(super) fn spawn_label_editor(
     mut commands: Commands,
     document: Res<Document>,
     theme: Res<Theme>,
     editing: Res<Editing>,
+    camera: Single<&Projection, With<Camera2d>>,
+    existing: Query<Entity, With<LabelBox>>,
 ) {
-    if let Some(id) = editing.edge() {
-        let edge = document.0.edges.iter().find(|edge| edge.id == id);
-        let face = theme.face(None, edge.and_then(|edge| style::text_color(&edge.extra)));
-        let label = edge.and_then(|edge| edge.label.as_deref());
-        commands.spawn(label_editor(label.unwrap_or_default(), &theme, &face));
+    // One box per session: this runs again on every change a panel reacts to.
+    for entity in &existing {
+        commands.entity(entity).despawn();
     }
+    let Some(id) = editing.edge() else {
+        return;
+    };
+    let Projection::Orthographic(ortho) = *camera else {
+        return;
+    };
+    let edge = document.0.edges.iter().find(|edge| edge.id == id);
+    let face = theme.face(None, edge.and_then(|edge| style::text_color(&edge.extra)));
+    let label = edge.and_then(|edge| edge.label.as_deref());
+    commands.spawn(label_editor(
+        label.unwrap_or_default(),
+        &face,
+        1.0 / ortho.scale,
+    ));
 }
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::type_complexity,
     reason = "a system's arguments are its query"
 )]
 pub(super) fn track_panels(
@@ -228,6 +279,7 @@ pub(super) fn track_panels(
     mut materials: ResMut<Assets<PolygonMaterial>>,
     mut panels: Query<(&Panel, &mut Node, &mut MaterialNode<PolygonMaterial>)>,
     mut contents: Query<(&Content, &mut UiTransform, &mut Node), Without<Panel>>,
+    mut bleeding: Query<&mut Node, (With<Bleed>, Without<Content>, Without<Panel>)>,
 ) {
     let (camera, cam_global, projection) = *camera;
     let Projection::Orthographic(ortho) = projection else {
@@ -278,12 +330,18 @@ pub(super) fn track_panels(
         }
     }
 
+    let bleed = px(-bleed(raster.0, zoom));
+    for mut node in &mut bleeding {
+        if node.left != bleed {
+            (node.left, node.top, node.right, node.bottom) = (bleed, bleed, bleed, bleed);
+        }
+    }
+
     for (content, mut transform, mut node) in &mut contents {
         let Some(&(_, size)) = placed.get(content.0.as_str()) else {
             continue;
         };
-        let sides = current.get(content.0.as_str()).and_then(|node| node.sides);
-        let want = content_padding(sides, size, raster.0);
+        let want = content_padding(current.get(content.0.as_str()).copied(), size, raster.0);
         if node.padding != want {
             node.padding = want;
         }
@@ -304,6 +362,12 @@ pub(super) fn track_panels(
             *transform = want;
         }
     }
+}
+
+// In content pixels, which the panel's own scale shrinks on the way to the
+// screen: the overshoot is a pixel there however far out the board is.
+pub(super) fn bleed(raster: f32, zoom: f32) -> f32 {
+    BLEED_PX * raster / zoom
 }
 
 // A gizmo would be drawn in the world, under the panel it means to ring.

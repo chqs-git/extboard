@@ -225,6 +225,7 @@ impl Plugin for ThemePlugin {
         // into. Headless -- a test -- gets the panel's logic and no picture.
         app.init_asset::<DialMaterial>();
         embedded_asset!(app, "JetBrainsMono-Regular.ttf");
+        embedded_asset!(app, "Twemoji.Mozilla.ttf");
         if app.get_sub_app(RenderApp).is_some() {
             embedded_asset!(app, "picker.wgsl");
             app.add_plugins(UiMaterialPlugin::<DialMaterial>::default());
@@ -237,6 +238,11 @@ impl Plugin for ThemePlugin {
             .init_resource::<Naming>()
             .init_resource::<Picking>()
             .init_resource::<Targeting>()
+            .add_systems(Startup, load_emoji)
+            .add_systems(
+                Update,
+                map_emoji.run_if(resource_exists::<FontCx>.and_then(unmapped)),
+            )
             .add_systems(
                 Update,
                 (
@@ -515,6 +521,48 @@ fn family_of(font_cx: &mut FontCx, font: &Font) -> Option<String> {
         .into_iter()
         .next()?;
     font_cx.collection.family_name(family).map(str::to_owned)
+}
+
+// The handle lives as long as the app: bevy rebuilds its font collection from
+// the live assets, and the emoji mapping it restores needs this one among them.
+#[derive(Resource)]
+struct Emoji {
+    font: Handle<Font>,
+    mapped: bool,
+}
+
+fn load_emoji(mut commands: Commands, assets: Res<AssetServer>) {
+    let path =
+        AssetPath::from_path_buf(embedded_path!("Twemoji.Mozilla.ttf")).with_source("embedded");
+    commands.insert_resource(Emoji {
+        font: assets.load(path),
+        mapped: false,
+    });
+}
+
+fn unmapped(emoji: Option<Res<Emoji>>) -> bool {
+    emoji.is_some_and(|emoji| !emoji.mapped)
+}
+
+// One font for every platform: a browser has no system emoji to fall back on.
+fn map_emoji(
+    assets: Res<Assets<Font>>,
+    mut font_cx: ResMut<FontCx>,
+    mut emoji: ResMut<Emoji>,
+    mut theme: ResMut<Theme>,
+) {
+    let Some(family) = assets
+        .get(emoji.font.id())
+        .and_then(|font| family_of(&mut font_cx, font))
+    else {
+        return;
+    };
+    if let Err(err) = font_cx.set_emoji_family(&family) {
+        warn!("emoji font {family}: {err}");
+    }
+    emoji.mapped = true;
+    // Text laid out before the mapping fell back to nothing; this respawns it.
+    theme.set_changed();
 }
 
 fn repaint(theme: Res<Theme>, mut clear: ResMut<ClearColor>) {

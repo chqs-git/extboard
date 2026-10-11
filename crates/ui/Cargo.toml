@@ -11,6 +11,15 @@ serde_json.workspace = true
 # The one HTTP client for both targets: non-blocking on native and wasm, so
 # client.rs gets written once instead of twice.
 ehttp = { version = "0.7", features = ["streaming"] }
+# A dropped image's dimensions off its own bytes, and the PNG encoder for a
+# pasted screenshot: arboard hands over raw RGBA and the spaces dir holds files.
+# Already in the tree under `bevy_image` on both targets.
+image = { version = "0.25", default-features = false, features = [
+  "png",
+  "jpeg",
+  "gif",
+  "webp",
+] }
 # Node markdown (E3-T6).
 pulldown-cmark = { version = "0.13", default-features = false, features = ["simd"] }
 # Board scripts (E6-T4). `sync` is what lets the engine live in a resource;
@@ -84,11 +93,6 @@ bevy = { version = "0.19", default-features = false, features = [
   "http",
   "https",
 ] }
-# The PNG encoder for a pasted screenshot: arboard hands over raw RGBA and the
-# spaces dir holds files. Already in the tree under `bevy_image`, so this
-# declares what is there rather than adding anything.
-image = { version = "0.25", default-features = false, features = ["png"] }
-
 [target.'cfg(target_family = "wasm")'.dependencies]
 bevy = { version = "0.19", default-features = false, features = ["webgl2"] }
 # All three are already in the tree under bevy. The features are what reads

@@ -1,6 +1,8 @@
-use super::edit_text::written_back;
-use super::panel::centre_scale_offset;
+use super::edit_text::label_size;
+use super::edit_text::{LINE_HEIGHT, written_back};
+use super::panel::{bleed, centre_scale_offset};
 use super::*;
+use crate::scene::LABEL_SIZE;
 use extboard_core::{ACCENT, Canvas, Edge, Vars};
 
 fn blocks(md: &str) -> Vec<Block> {
@@ -256,10 +258,14 @@ fn a_link_and_a_code_span_are_the_themes_rather_than_fixed_colours() {
 
 // bevy clips an editor to its content box as laid out, before the panel's scale
 // reaches it, so any stretch at all is glyphs cut off at the left and the top.
+// The camera moves freely mid-session, so the tier has to hold at every zoom it
+// passes through and not only the one the session opened on.
 #[test]
 fn an_editing_session_is_never_stretched() {
-    for zoom in [0.25, 1.0, 1.19, 1.2, 2.4, 3.6, 5.0, 8.0] {
-        let scale = zoom / editing_raster(zoom);
+    let mut raster = 1.0;
+    for zoom in [0.25, 1.0, 1.19, 1.2, 2.4, 3.6, 5.0, 8.0, 2.0, 0.3, 19.9] {
+        raster = session_raster(raster, zoom);
+        let scale = zoom / raster;
         assert!(scale <= 1.0, "zoom {zoom}: scaled by {scale}");
     }
     // The slack a drawn panel is allowed is the stretch that cut the text.
@@ -315,4 +321,42 @@ fn a_door_is_indexed_by_its_span_position_in_the_line() {
         [(1, "trip".to_owned()), (3, "kitchen-sink".to_owned()),]
     );
     assert!(doors(line(&blocks("just prose"), 0)).is_empty());
+}
+
+// The label editor's box is sized to the one line it holds, which is what lands
+// it over the label it replaces rather than near it. A bevy default moving out
+// from under that is the thing this catches.
+#[test]
+fn the_label_editor_is_exactly_one_line_tall() {
+    assert_eq!(
+        bevy::text::LineHeight::default(),
+        bevy::text::LineHeight::RelativeToFont(LINE_HEIGHT)
+    );
+}
+
+// The editor stands in for a label drawn in the world, so it has to measure the
+// same on screen at every zoom -- and never round away to nothing.
+#[test]
+fn the_label_editor_matches_the_drawn_label_at_every_zoom() {
+    for zoom in [0.05, 0.5, 1.0, 2.6, 20.0] {
+        let size = label_size(zoom);
+        assert!(size >= 1.0, "zoom {zoom}: {size}");
+        assert!(
+            (size - LABEL_SIZE * zoom).abs() <= 0.5,
+            "zoom {zoom}: {size}"
+        );
+    }
+}
+
+// The image overshoots its box in content pixels and is cut off by the panel's
+// clip in screen pixels; the scale between them is what has to cancel out.
+#[test]
+fn the_image_bleed_is_one_screen_pixel_at_every_zoom() {
+    for (raster, zoom) in [(1.0, 0.05), (1.0, 1.0), (2.0, 1.8), (3.0, 2.6), (8.0, 8.0)] {
+        let scale = zoom / raster;
+        assert!(
+            (bleed(raster, zoom) * scale - 1.0).abs() < 1e-5,
+            "{raster}/{zoom}"
+        );
+    }
 }

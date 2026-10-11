@@ -12,7 +12,8 @@ use crate::theme::write_fonts;
 
 use super::added;
 
-// What a dropped image lands as; it resizes like any other node.
+// The box a dropped image lands inside, keeping its own ratio; it resizes like
+// any other node afterwards.
 const DROP_SIZE: Vec2 = Vec2::new(320.0, 240.0);
 const CAPTION_SIZE: Vec2 = Vec2::new(320.0, 60.0);
 
@@ -23,6 +24,7 @@ enum Landed {
     File {
         file: String,
         screen: Option<Vec2>,
+        size: Vec2,
     },
     #[cfg_attr(
         not(target_arch = "wasm32"),
@@ -64,6 +66,24 @@ pub(super) fn dropped(
     }
 }
 
+// An image keeps its ratio inside the box and is never blown up past its own
+// pixels; a font, or anything `image` cannot read, takes the whole box.
+fn fitted(bytes: &[u8]) -> Vec2 {
+    let Some(size) = dimensions(bytes) else {
+        return DROP_SIZE;
+    };
+    size * (DROP_SIZE / size).min_element().min(1.0)
+}
+
+fn dimensions(bytes: &[u8]) -> Option<Vec2> {
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    (width > 0 && height > 0).then(|| Vec2::new(width as f32, height as f32))
+}
+
 // extd owns the spaces dir on both targets: the browser cannot write to it at
 // all, and one uploader beats two ways of putting a file in one directory.
 pub(super) fn upload(uploads: &Uploads, name: &str, bytes: Vec<u8>, screen: Option<Vec2>) {
@@ -71,6 +91,9 @@ pub(super) fn upload(uploads: &Uploads, name: &str, bytes: Vec<u8>, screen: Opti
         warn!("{name} is neither an image nor a font, so nothing was added");
         return;
     }
+    // The bytes are here and nowhere later: extd answers with a path, and the
+    // texture the asset server loads is frames away.
+    let size = fitted(&bytes);
     let request = ehttp::Request::post(
         format!("{}/api/files/{}", base_url(), url_path(name)),
         bytes,
@@ -83,6 +106,7 @@ pub(super) fn upload(uploads: &Uploads, name: &str, bytes: Vec<u8>, screen: Opti
         Ok(response) if response.ok => lock(&uploads).push(Landed::File {
             file: String::from_utf8_lossy(&response.bytes).into_owned(),
             screen,
+            size,
         }),
         Ok(response) => error!("extd refused the upload: {}", response.status),
         Err(e) => error!("upload failed: {e}"),
@@ -100,8 +124,8 @@ pub(super) fn landed(
 ) {
     let (camera, cam_global) = *camera;
     for item in std::mem::take(&mut *lock(&uploads)) {
-        let (file, screen) = match item {
-            Landed::File { file, screen } => (file, screen),
+        let (file, screen, size) = match item {
+            Landed::File { file, screen, size } => (file, screen, size),
             // Whatever holds the keyboard takes it at the caret, the way bevy's
             // own editor would on a key it never sees on this target.
             Landed::Nodes(text) => {
@@ -128,11 +152,15 @@ pub(super) fn landed(
             continue;
         }
 
-        let at = world(camera, cam_global, screen);
+        let at = world(
+            camera,
+            cam_global,
+            screen.or_else(|| window.cursor_position()),
+        );
         added(
             &mut document.0,
             frames.0,
-            Rect::from_center_size(at, DROP_SIZE),
+            Rect::from_center_size(at, size),
             NodeKind::File {
                 file: file.clone(),
                 subpath: None,
@@ -144,7 +172,7 @@ pub(super) fn landed(
             &mut document.0,
             frames.0,
             Rect::from_center_size(
-                at - Vec2::new(0.0, (DROP_SIZE.y + CAPTION_SIZE.y) / 2.0),
+                at - Vec2::new(0.0, (size.y + CAPTION_SIZE.y) / 2.0),
                 CAPTION_SIZE,
             ),
             NodeKind::Text {
@@ -297,6 +325,22 @@ fn lock(uploads: &Uploads) -> MutexGuard<'_, Vec<Landed>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_keeps_its_ratio_inside_the_box_and_is_never_blown_up() {
+        assert_eq!(fitted(&png(640, 480)), DROP_SIZE);
+        assert_eq!(fitted(&png(1280, 320)), Vec2::new(320.0, 80.0));
+        assert_eq!(fitted(&png(10, 20)), Vec2::new(10.0, 20.0));
+        assert_eq!(fitted(b"a font, or anything with no dimensions"), DROP_SIZE);
+    }
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        image::DynamicImage::new_rgba8(width, height)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .expect("a blank image encodes");
+        out
+    }
 
     #[test]
     fn a_caption_is_a_heading_made_of_the_filename() {

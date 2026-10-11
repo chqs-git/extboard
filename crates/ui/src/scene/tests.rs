@@ -94,3 +94,43 @@ fn nearest_takes_the_closest_edge_within_reach_and_nothing_outside_it() {
     assert_eq!(nearest(&canvas, Vec2::new(350.0, -25.0), 8.0), None);
     assert_eq!(nearest(&canvas, Vec2::new(200.0, -200.0), 8.0), None);
 }
+
+// A label hangs off the shaft, so on an edge it lies broad side across it the
+// text sits tens of pixels from the line `nearest` measures. Its own box is what
+// has to catch a click that landed on the text.
+#[test]
+fn a_label_reaches_where_the_shaft_does_not() {
+    let mut canvas = canvas();
+    let mut below = node("b", 0);
+    below.y = 300;
+    canvas.nodes = vec![node("a", 0), below];
+    canvas.edges.truncate(1);
+
+    let (_, a, b) = segments(&canvas).find(|(id, _, _)| *id == "e1").unwrap();
+    let midpoint = a.midpoint(b);
+    let at = Transform::from_translation(midpoint.extend(LABEL_Z));
+    let label = TextLayoutInfo {
+        size: Vec2::new(90.0, 14.0),
+        ..default()
+    };
+    let box_ = label_box(&at, &label);
+
+    // The far end of the text: past the shaft's reach, inside the label.
+    let on_the_text = midpoint + Vec2::new(40.0, 0.0);
+    assert_eq!(nearest(&canvas, on_the_text, 8.0), None);
+    assert!(box_.contains(on_the_text));
+    // And no wider than the text it measured.
+    assert!(!box_.contains(midpoint + Vec2::new(46.0, 0.0)));
+
+    // A rastered label is laid out that much bigger and scaled back down, so
+    // its world box is the same box.
+    let rastered = Transform {
+        scale: Vec3::splat(0.25),
+        ..at
+    };
+    let big = TextLayoutInfo {
+        size: label.size * 4.0,
+        ..default()
+    };
+    assert_eq!(label_box(&rastered, &big), box_);
+}

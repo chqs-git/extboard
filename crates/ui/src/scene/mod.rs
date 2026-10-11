@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use crate::client::Document;
 use crate::select::{OUTLINE, Selected};
+use crate::text::Raster;
 use crate::theme::Theme;
 
 mod arrow;
@@ -14,7 +15,7 @@ pub use arrow::draw_arrow;
 use geometry::{edge_ends, resolved_edges};
 pub use geometry::{nearest, segments};
 
-const LABEL_SIZE: f32 = 12.0;
+pub const LABEL_SIZE: f32 = 12.0;
 // Above the node rects, which sit at 0.
 const LABEL_Z: f32 = 1.0;
 // The shaft at the middle stroke weight, in screen pixels.
@@ -46,7 +47,9 @@ impl Plugin for ScenePlugin {
                     .in_set(crate::node::Respawn)
                     // Ahead of the node respawn, which spends the `Reselect` both read.
                     .before(crate::node::spawn_nodes)
-                    .run_if(resource_exists_and_changed::<Document>),
+                    .run_if(resource_exists::<Document>.and_then(
+                        resource_changed::<Document>.or_else(resource_changed::<Raster>),
+                    )),
                 // Every frame, like the edges themselves: a drag moves nodes
                 // without waking change detection, and the label has to keep up.
                 place_edges.run_if(resource_exists::<Document>),
@@ -79,7 +82,7 @@ fn draw_edges(
     theme: Res<Theme>,
     selected: Query<&EdgeId, With<Selected>>,
     // Its size is what the shaft makes room for: measured, not guessed.
-    labels: Query<(&EdgeId, &TextLayoutInfo)>,
+    labels: Query<(&EdgeId, &Transform, &TextLayoutInfo)>,
 ) {
     for (edge, from, to) in resolved_edges(&document.0) {
         let (a, b) = edge_ends(from, edge.from_side, to, edge.to_side);
@@ -94,14 +97,23 @@ fn draw_edges(
         );
         let hole = labels
             .iter()
-            .find(|(id, _)| id.0 == edge.id)
-            .map(|(_, label)| label.size);
+            .find(|(id, _, _)| id.0 == edge.id)
+            .map(|(_, at, label)| label.size * at.scale.truncate());
         match stroke_width(&edge.extra) {
             Some(1) => draw_arrow(&mut thin, a, b, heads, hole, color),
             Some(3) => draw_arrow(&mut thick, a, b, heads, hole, color),
             _ => draw_arrow(&mut mid, a, b, heads, hole, color),
         }
     }
+}
+
+// A label's box in world space: the `Text2d` is centred on the edge's midpoint.
+// It counts as the edge for a click, because on a steep edge the text sticks out
+// far past the few pixels of reach around the shaft.
+// Its size is in layout pixels, which the raster tier blew up: the entity's own
+// scale is what puts them back.
+pub fn label_box(at: &Transform, label: &TextLayoutInfo) -> Rect {
+    Rect::from_center_size(at.translation.truncate(), label.size * at.scale.truncate())
 }
 
 // The spec's colour is the edge's line, and an edge that names none follows the
@@ -114,6 +126,7 @@ fn spawn_edges(
     mut commands: Commands,
     document: Res<Document>,
     theme: Res<Theme>,
+    raster: Res<Raster>,
     reselect: Option<Res<crate::node::Reselect>>,
     existing: Query<(Entity, &EdgeId, Has<Selected>)>,
 ) {
@@ -129,10 +142,12 @@ fn spawn_edges(
 
     for (edge, from, to) in resolved_edges(&document.0) {
         let (a, b) = edge_ends(from, edge.from_side, to, edge.to_side);
-        let mut spawned = commands.spawn((
-            EdgeId(edge.id.clone()),
-            Transform::from_translation(a.midpoint(b).extend(LABEL_Z)),
-        ));
+        // Laid out `raster` times too big and scaled back down, like the node
+        // panels: glyphs are rasterized at the size they are laid out at, so a
+        // fixed LABEL_SIZE is a bitmap the camera's zoom then stretches.
+        let at = Transform::from_translation(a.midpoint(b).extend(LABEL_Z))
+            .with_scale(Vec3::splat(1.0 / raster.0));
+        let mut spawned = commands.spawn((EdgeId(edge.id.clone()), at));
         if selected.contains(&edge.id.as_str()) {
             spawned.insert(Selected);
         }
@@ -143,7 +158,7 @@ fn spawn_edges(
                 TextFont {
                     font: face.source,
                     font_smoothing: face.smoothing,
-                    ..TextFont::from_font_size(LABEL_SIZE)
+                    ..TextFont::from_font_size(LABEL_SIZE * raster.0)
                 },
                 TextColor(face.ink),
             ));
@@ -151,12 +166,26 @@ fn spawn_edges(
     }
 }
 
-fn place_edges(document: Res<Document>, mut edges: Query<(&EdgeId, &mut Transform)>) {
+fn place_edges(
+    document: Res<Document>,
+    editing: Res<crate::text::Editing>,
+    mut edges: Query<(&EdgeId, &mut Transform, Option<&mut Visibility>)>,
+) {
     let placed: HashMap<&str, Vec3> = segments(&document.0)
         .map(|(id, a, b)| (id, a.midpoint(b).extend(LABEL_Z)))
         .collect();
 
-    for (id, mut transform) in &mut edges {
+    for (id, mut transform, visibility) in &mut edges {
+        // The editor draws the label for as long as it is open; two of them over
+        // one midpoint is what read as a form.
+        if let Some(mut visibility) = visibility {
+            let want = if editing.edge() == Some(id.0.as_str()) {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
+            visibility.set_if_neq(want);
+        }
         let Some(&want) = placed.get(id.0.as_str()) else {
             continue;
         };
