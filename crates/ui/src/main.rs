@@ -5,6 +5,7 @@ mod edit;
 mod hud;
 mod icon;
 mod node;
+mod palette;
 mod scene;
 mod script;
 mod select;
@@ -71,7 +72,12 @@ fn main() {
             text::TextPlugin,
             theme::ThemePlugin,
             // Nested: `Plugins` is implemented up to a tuple of fifteen.
-            (icon::IconPlugin, tip::TipPlugin, undo::UndoPlugin),
+            (
+                icon::IconPlugin,
+                palette::PalettePlugin,
+                tip::TipPlugin,
+                undo::UndoPlugin,
+            ),
         ))
         .run();
 }
