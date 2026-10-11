@@ -1,13 +1,13 @@
 use bevy::input_focus::{AutoFocus, InputFocus};
 use bevy::prelude::*;
-use bevy::text::{EditableText, FontSize, TextCursorStyle, TextEdit, TextLayoutInfo};
+use bevy::text::{EditableText, FontSize, TextCursorStyle, TextEdit};
 use extboard_core::{Canvas, NodeKind};
 
 use crate::camera::world_to_screen;
 use crate::client::Document;
 use crate::edit::{command, double_click};
 use crate::node::{NodeId, NodeRect};
-use crate::scene::{EdgeId, LABEL_SIZE, label_box, nearest};
+use crate::scene::{EdgeId, LABEL_SIZE, LabelSize, edge_depth, label_box, nearest};
 use crate::select::{EDGE_PX, bounds, cursor_world, pick};
 use crate::theme::Face;
 
@@ -229,7 +229,7 @@ pub(super) fn toggle(
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(&NodeId, &Transform, &NodeRect)>,
-    edges: Query<(&EdgeId, &Transform, Option<&TextLayoutInfo>)>,
+    edges: Query<(&EdgeId, &Transform, Option<&LabelSize>)>,
     editors: Query<&EditableText, With<Editor>>,
     buffers: Query<&EditableText, With<crate::script::ScriptBuffer>>,
     sidebar: Res<crate::script::Sidebar>,
@@ -310,25 +310,21 @@ pub(super) fn toggle(
 fn opened(
     canvas: &Canvas,
     nodes: &Query<(&NodeId, &Transform, &NodeRect)>,
-    edges: &Query<(&EdgeId, &Transform, Option<&TextLayoutInfo>)>,
+    edges: &Query<(&EdgeId, &Transform, Option<&LabelSize>)>,
     world: Vec2,
     reach: f32,
 ) -> Option<Target> {
     let node = pick(
-        nodes
-            .iter()
-            .map(|(id, transform, rect)| (&id.0, bounds(transform, rect), transform.translation.z)),
+        nodes.iter().map(|(id, transform, rect)| {
+            (
+                (&id.0, transform.translation.z),
+                bounds(transform, rect),
+                transform.translation.z,
+            )
+        }),
         world,
     );
-    if let Some(id) = node.filter(|id| {
-        canvas
-            .nodes
-            .iter()
-            .any(|node| &node.id == *id && markdown(node).is_some())
-    }) {
-        return Some(Target::Node(id.clone()));
-    }
-    nearest(canvas, world, reach)
+    let edge = nearest(canvas, world, reach)
         .map(str::to_owned)
         .or_else(|| {
             edges.iter().find_map(|(edge, at, label)| {
@@ -336,8 +332,23 @@ fn opened(
                     .filter(|label| label_box(at, label).contains(world))
                     .map(|_| edge.0.clone())
             })
-        })
-        .map(Target::Edge)
+        });
+    // An edge stacked over the node takes the click, as it does a single one.
+    let over = |depth: f32| {
+        edge.as_deref()
+            .and_then(|id| edge_depth(canvas, id))
+            .is_some_and(|edge| edge >= depth)
+    };
+    if let Some((id, _)) = node.filter(|(id, depth)| {
+        !over(*depth)
+            && canvas
+                .nodes
+                .iter()
+                .any(|node| &node.id == *id && markdown(node).is_some())
+    }) {
+        return Some(Target::Node(id.clone()));
+    }
+    edge.map(Target::Edge)
 }
 
 // Whether the press is still inside what is being edited: the node's rect, or
@@ -345,7 +356,7 @@ fn opened(
 fn holds(
     target: &Target,
     nodes: &Query<(&NodeId, &Transform, &NodeRect)>,
-    edges: &Query<(&EdgeId, &Transform, Option<&TextLayoutInfo>)>,
+    edges: &Query<(&EdgeId, &Transform, Option<&LabelSize>)>,
     camera: (&Camera, &GlobalTransform),
     window: &Window,
     world: Option<Vec2>,

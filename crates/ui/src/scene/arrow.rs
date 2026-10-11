@@ -1,9 +1,9 @@
 use bevy::prelude::*;
 
 const HEAD_LEN: f32 = 18.0;
-const HEAD_HALF_WIDTH: f32 = 8.0;
+pub(super) const HEAD_HALF_WIDTH: f32 = 8.0;
 // Clear space around a label where the shaft would otherwise run through it.
-const LABEL_PAD: f32 = 6.0;
+pub(super) const LABEL_PAD: f32 = 6.0;
 
 // Generic over the config group, because a gizmo's width is the group's: the
 // three stroke weights are three groups, and this draws into any of them.

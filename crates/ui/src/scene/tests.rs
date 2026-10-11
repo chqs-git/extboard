@@ -108,12 +108,8 @@ fn a_label_reaches_where_the_shaft_does_not() {
 
     let (_, a, b) = segments(&canvas).find(|(id, _, _)| *id == "e1").unwrap();
     let midpoint = a.midpoint(b);
-    let at = Transform::from_translation(midpoint.extend(LABEL_Z));
-    let label = TextLayoutInfo {
-        size: Vec2::new(90.0, 14.0),
-        ..default()
-    };
-    let box_ = label_box(&at, &label);
+    let at = Transform::from_translation(midpoint.extend(0.0));
+    let box_ = label_box(&at, &LabelSize(Vec2::new(90.0, 14.0)));
 
     // The far end of the text: past the shaft's reach, inside the label.
     let on_the_text = midpoint + Vec2::new(40.0, 0.0);
@@ -121,16 +117,25 @@ fn a_label_reaches_where_the_shaft_does_not() {
     assert!(box_.contains(on_the_text));
     // And no wider than the text it measured.
     assert!(!box_.contains(midpoint + Vec2::new(46.0, 0.0)));
+}
 
-    // A rastered label is laid out that much bigger and scaled back down, so
-    // its world box is the same box.
-    let rastered = Transform {
-        scale: Vec3::splat(0.25),
-        ..at
-    };
-    let big = TextLayoutInfo {
-        size: label.size * 4.0,
-        ..default()
-    };
-    assert_eq!(label_box(&rastered, &big), box_);
+#[test]
+fn a_band_catches_an_edge_it_crosses_even_with_both_ends_outside() {
+    let band = Rect::from_corners(Vec2::new(-10.0, -10.0), Vec2::new(10.0, 10.0));
+    assert!(crosses(band, Vec2::new(-50.0, 0.0), Vec2::new(50.0, 0.0)));
+    assert!(crosses(band, Vec2::new(0.0, 0.0), Vec2::new(50.0, 50.0)));
+    // Beside it, and a diagonal that cuts past the corner.
+    assert!(!crosses(
+        band,
+        Vec2::new(-50.0, 20.0),
+        Vec2::new(50.0, 20.0)
+    ));
+    assert!(!crosses(band, Vec2::new(0.0, 30.0), Vec2::new(30.0, 0.0)));
+}
+
+#[test]
+fn an_edge_stacks_over_the_front_one_of_its_ends() {
+    let canvas = canvas();
+    assert_eq!(edge_depth(&canvas, "e1"), Some(crate::node::depth(1, 3)));
+    assert_eq!(edge_depth(&canvas, "e2"), Some(crate::node::depth(2, 3)));
 }

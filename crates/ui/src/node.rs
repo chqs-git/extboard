@@ -132,6 +132,12 @@ fn placement(node: &extboard_core::Node, depth: f32) -> Transform {
     .with_scale(size.extend(1.0))
 }
 
+// The panel's stacking: twice the rank, so the odd step above a node is where
+// the edges it is the front end of go.
+pub fn stack(rank: usize) -> ZIndex {
+    ZIndex(2 * rank as i32)
+}
+
 // Array position is z-order, last front-most (PLAN.md §8), spread over (-1, 0)
 // so z=1 is left for edge labels.
 pub fn depth(index: usize, count: usize) -> f32 {

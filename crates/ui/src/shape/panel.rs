@@ -6,8 +6,9 @@ use bevy::ui_widgets::{
     Slider, SliderRange, SliderStep, SliderThumb, SliderValue, TrackClick, ValueChange,
 };
 use extboard_core::{
-    CIRCLE_SIDES, Canvas, FONT_ROLES, LEFT_ALIGN, MID_STROKE, MIN_SIDES, PRIMARY, PRIMARY_TEXT,
-    SECONDARY, STROKES, TEXT, Theme as Block, align, stroke_width, style,
+    CIRCLE_SIDES, Canvas, DASHES, FONT_ROLES, LEFT_ALIGN, MID_STROKE, MIN_SIDES, PRIMARY,
+    PRIMARY_TEXT, SECONDARY, SOLID, STROKES, TEXT, Theme as Block, align, dash, stroke_width,
+    style,
 };
 use serde_json::{Map, Value};
 
@@ -90,6 +91,7 @@ pub(crate) struct ConfigPanel {
     pub(super) weight: Option<u8>,
     pub(super) font: Option<usize>,
     pub(super) align: Option<usize>,
+    pub(super) dash: Option<usize>,
     pub(super) slots: usize,
     pub(super) open: Option<Row>,
 }
@@ -105,6 +107,9 @@ struct Weight(u8);
 
 #[derive(Component)]
 struct Align(usize);
+
+#[derive(Component)]
+struct Dash(usize);
 
 #[derive(Component)]
 struct Restack(Depth);
@@ -233,6 +238,7 @@ pub(super) fn shown(
             weight: stroke_width(extra),
             font: style::font_role(extra),
             align: align(extra),
+            dash: dash(extra),
             slots: theme.live.colors.len(),
             // An edge has no body and no text of its own to set, so neither
             // list can be open over it -- not even one the node before it left
@@ -252,7 +258,7 @@ fn spawn(commands: &mut Commands, theme: &Theme, icons: &Icons, want: Shown) {
     let (outline, text) = (panel.outline.clone(), panel.text.clone());
     let background = panel.background.clone();
     let (weight, font, open) = (panel.weight, panel.font, panel.open);
-    let align = panel.align;
+    let (align, dash) = (panel.align, panel.dash);
     commands
         .spawn((
             panel,
@@ -301,6 +307,14 @@ fn spawn(commands: &mut Commands, theme: &Theme, icons: &Icons, want: Shown) {
                     weight_button(parent, weight, weight == pen);
                 }
             });
+            if !node {
+                let picked = dash.unwrap_or(SOLID);
+                labelled(parent, "line", |parent| {
+                    for dash in 0..DASHES.len() {
+                        dash_button(parent, dash, dash == picked);
+                    }
+                });
+            }
             if let Some(sides) = sides {
                 sides_row(parent, sides);
             }
@@ -476,6 +490,24 @@ fn align_button(parent: &mut ChildSpawnerCommands, align: usize, on: bool) {
             children![tag(ALIGN_LABELS[align], if on { FG } else { LABEL })],
         ))
         .observe(pick_align);
+}
+
+fn dash_button(parent: &mut ChildSpawnerCommands, dash: usize, on: bool) {
+    parent
+        .spawn((
+            Dash(dash),
+            Node {
+                flex_grow: 1.0,
+                height: px(ROW),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border_radius: BorderRadius::all(px(3.0)),
+                ..default()
+            },
+            BackgroundColor(row_bg(on)),
+            children![tag(DASHES[dash], if on { FG } else { LABEL })],
+        ))
+        .observe(pick_dash);
 }
 
 // Back to front, left to right, so the row reads the way the stack does. The
@@ -713,6 +745,20 @@ fn pick_align(
     };
     if let Some(extra) = extras(&mut document.0, &panel.target) {
         style::set_align(extra, Some(button.0));
+    }
+}
+
+fn pick_dash(
+    press: On<Pointer<Press>>,
+    buttons: Query<&Dash>,
+    panels: Query<&ConfigPanel>,
+    mut document: ResMut<Document>,
+) {
+    let (Ok(button), Ok(panel)) = (buttons.get(press.entity), panels.single()) else {
+        return;
+    };
+    if let Some(extra) = extras(&mut document.0, &panel.target) {
+        style::set_dash(extra, Some(button.0));
     }
 }
 

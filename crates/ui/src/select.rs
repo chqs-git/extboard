@@ -1,13 +1,12 @@
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
-use bevy::text::TextLayoutInfo;
 
 use crate::camera::{screen_to_world, world_to_screen};
 use crate::client::Document;
 use crate::edit::{MIN_SIZE, Reach, TIP_PX, anchor_under, created, rects, tip_under};
 use crate::node::{NodeKind, NodeRect};
 use crate::palette::Tool;
-use crate::scene::{EdgeId, label_box, nearest};
+use crate::scene::{EdgeId, LabelSize, crosses, edge_depth, label_box, nearest, segments};
 
 // A selected edge is painted with it in scene.rs, and a selected node's panel
 // outlined with it in text/panel.rs.
@@ -143,7 +142,7 @@ fn press(
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(Entity, &Transform, &NodeRect)>,
     kinds: Query<&NodeKind>,
-    edges: Query<(Entity, &EdgeId, &Transform, Option<&TextLayoutInfo>)>,
+    edges: Query<(Entity, &EdgeId, &Transform, Option<&LabelSize>)>,
     document: Option<Res<Document>>,
     selected: Query<Entity, With<Selected>>,
     tool: Res<Tool>,
@@ -180,20 +179,26 @@ fn press(
         world,
     );
 
-    let edge = tries_the_edge(node.and_then(|entity| kinds.get(entity).ok()))
-        .then(|| {
-            document
-                .as_deref()
-                .and_then(|document| nearest(&document.0, world, EDGE_PX * ortho.scale))
-                .and_then(|id| {
-                    edges
-                        .iter()
-                        .find(|(_, edge, _, _)| edge.0 == id)
-                        .map(|(entity, _, _, _)| entity)
-                })
-                .or_else(|| label_at(&edges, world))
+    let edge = document
+        .as_deref()
+        .and_then(|document| {
+            let id = nearest(&document.0, world, EDGE_PX * ortho.scale)
+                .map(str::to_owned)
+                .or_else(|| label_at(&edges, world))?;
+            let under = node.and_then(|entity| {
+                Some((
+                    kinds.get(entity).ok()?,
+                    nodes.get(entity).ok()?.1.translation.z,
+                ))
+            });
+            tries_the_edge(under, edge_depth(&document.0, &id)?).then_some(id)
         })
-        .flatten();
+        .and_then(|id| {
+            edges
+                .iter()
+                .find(|(_, edge, _, _)| edge.0 == id)
+                .map(|(entity, _, _, _)| entity)
+        });
 
     if let Some(entity) = edge.or(node) {
         return picked(&mut commands, &selected, add, entity);
@@ -226,6 +231,8 @@ fn drag_band(
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     nodes: Query<(Entity, &Transform, &NodeRect)>,
+    edges: Query<(Entity, &EdgeId)>,
+    document: Option<Res<Document>>,
     selected: Query<Entity, With<Selected>>,
     box_: Single<
         (
@@ -275,7 +282,7 @@ fn drag_band(
         .base
         .iter()
         .copied()
-        .filter(|e| nodes.contains(*e))
+        .filter(|e| nodes.contains(*e) || edges.contains(*e))
         .collect();
     keep.extend(
         nodes
@@ -283,6 +290,18 @@ fn drag_band(
             .filter(|(_, transform, node)| !bounds(transform, node).intersect(rect).is_empty())
             .map(|(entity, _, _)| entity),
     );
+    if let Some(document) = &document {
+        let swept: Vec<&str> = segments(&document.0)
+            .filter(|(_, a, b)| crosses(rect, *a, *b))
+            .map(|(id, _, _)| id)
+            .collect();
+        keep.extend(
+            edges
+                .iter()
+                .filter(|(_, id)| swept.contains(&id.0.as_str()))
+                .map(|(entity, _)| entity),
+        );
+    }
     replace(&mut commands, &selected, &keep);
 }
 
@@ -310,18 +329,20 @@ fn release(
 // The edge whose label the cursor is in, for a click that landed on the text
 // rather than near the shaft it hangs off.
 fn label_at(
-    edges: &Query<(Entity, &EdgeId, &Transform, Option<&TextLayoutInfo>)>,
+    edges: &Query<(Entity, &EdgeId, &Transform, Option<&LabelSize>)>,
     world: Vec2,
-) -> Option<Entity> {
-    edges.iter().find_map(|(entity, _, at, label)| {
+) -> Option<String> {
+    edges.iter().find_map(|(_, id, at, label)| {
         label
             .filter(|label| label_box(at, label).contains(world))
-            .map(|_| entity)
+            .map(|_| id.0.clone())
     })
 }
 
-fn tries_the_edge(hit: Option<&NodeKind>) -> bool {
-    hit.is_none_or(NodeKind::is_group)
+// An edge is stacked just over the front one of its ends, so it takes the click
+// from a node behind that, and from a group, which is only ever a frame.
+fn tries_the_edge(hit: Option<(&NodeKind, f32)>, edge: f32) -> bool {
+    hit.is_none_or(|(kind, depth)| kind.is_group() || edge >= depth)
 }
 
 // A band this small is a slipped click, not a node someone drew.
@@ -416,20 +437,20 @@ mod tests {
     }
 
     #[test]
-    fn an_edge_is_reachable_over_a_group_and_never_over_a_card() {
+    fn an_edge_is_reachable_over_a_group_and_a_card_behind_it() {
         let kind = NodeKind;
+        let card = kind(extboard_core::NodeKind::Text {
+            text: String::new(),
+        });
+        let group = kind(extboard_core::NodeKind::Group { label: None });
         assert!(
-            tries_the_edge(None),
+            tries_the_edge(None, -0.5),
             "empty canvas: the edge is all there is"
         );
-        assert!(tries_the_edge(Some(&kind(
-            extboard_core::NodeKind::Group { label: None }
-        ))));
-        assert!(!tries_the_edge(Some(&kind(
-            extboard_core::NodeKind::Text {
-                text: String::new()
-            }
-        ))));
+        assert!(tries_the_edge(Some((&group, -0.2)), -0.5));
+        // Its own front end is the card at its depth, and the edge is over it.
+        assert!(tries_the_edge(Some((&card, -0.5)), -0.5));
+        assert!(!tries_the_edge(Some((&card, -0.2)), -0.5));
     }
 
     #[test]

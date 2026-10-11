@@ -1,8 +1,9 @@
 use bevy::prelude::*;
-use bevy::text::TextLayoutInfo;
-use extboard_core::{End, STROKES, TEXT, interpolate, stroke_width, style};
+use bevy::transform::TransformSystems;
+use extboard_core::{End, TEXT, interpolate, stroke_scale, style};
 use std::collections::HashMap;
 
+use crate::camera::world_to_screen;
 use crate::client::Document;
 use crate::select::{OUTLINE, Selected};
 use crate::text::Raster;
@@ -10,110 +11,87 @@ use crate::theme::Theme;
 
 mod arrow;
 mod geometry;
+mod line;
 
 pub use arrow::draw_arrow;
-use geometry::{edge_ends, resolved_edges};
-pub use geometry::{nearest, segments};
+use arrow::{HEAD_HALF_WIDTH, LABEL_PAD, box_reach};
+pub use geometry::{crosses, edge_depth, nearest, segments};
+use geometry::{edge_ends, rank, resolved_edges};
+use line::{LineMaterial, LinePaint};
 
 pub const LABEL_SIZE: f32 = 12.0;
-// Above the node rects, which sit at 0.
-const LABEL_Z: f32 = 1.0;
 // The shaft at the middle stroke weight, in screen pixels.
 const SHAFT: f32 = 3.0;
+// Room around the drawn line for its anti-aliased rim.
+const RIM_PX: f32 = 2.0;
 
 pub struct ScenePlugin;
 
+// The edge as the board's logic sees it: selected, hit, and on its midpoint.
+// What is drawn is the `EdgeLine` and `EdgeLabel` that share its id.
 #[derive(Component)]
 pub struct EdgeId(pub String);
 
-// A gizmo's width is its config group's, not the line's, so the only way to
-// draw two edges at two weights is a group per weight. The middle one is the
-// default group, which is also what the anchors in edit.rs are drawn in.
-#[derive(Default, Reflect, GizmoConfigGroup)]
-struct Thin;
+// The label's box in canvas units, measured off its laid-out text.
+#[derive(Component, Default)]
+pub struct LabelSize(pub Vec2);
 
-#[derive(Default, Reflect, GizmoConfigGroup)]
-struct Thick;
+#[derive(Component)]
+struct EdgeLine(String);
+
+#[derive(Component)]
+struct EdgeLabel(String);
 
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
-        app.insert_gizmo_config(DefaultGizmoConfigGroup, shaft(STROKES[1]))
-            .insert_gizmo_config(Thin, shaft(STROKES[0]))
-            .insert_gizmo_config(Thick, shaft(STROKES[2]));
-        app.add_systems(
+        line::register(app);
+        // The edge being drawn is still a gizmo, at the weight it will land at.
+        app.insert_gizmo_config(
+            DefaultGizmoConfigGroup,
+            GizmoConfig {
+                line: GizmoLineConfig {
+                    width: SHAFT,
+                    ..default()
+                },
+                ..default()
+            },
+        )
+        .add_systems(
             Update,
             (
                 spawn_edges
                     .in_set(crate::node::Respawn)
                     // Ahead of the node respawn, which spends the `Reselect` both read.
                     .before(crate::node::spawn_nodes)
-                    .run_if(resource_exists::<Document>.and_then(
-                        resource_changed::<Document>.or_else(resource_changed::<Raster>),
-                    )),
-                // Every frame, like the edges themselves: a drag moves nodes
-                // without waking change detection, and the label has to keep up.
+                    .run_if(
+                        resource_exists::<Document>.and_then(
+                            resource_changed::<Document>
+                                .or_else(resource_changed::<Raster>)
+                                .or_else(resource_changed::<Theme>),
+                        ),
+                    ),
+                // Every frame: a drag moves nodes without waking change detection.
                 place_edges.run_if(resource_exists::<Document>),
-                draw_edges.run_if(resource_exists::<Document>),
             )
                 .chain(),
+        )
+        // Where the node panels are tracked, and for the same reasons.
+        .add_systems(
+            PostUpdate,
+            (track_lines, track_labels)
+                .run_if(resource_exists::<Document>)
+                .after(TransformSystems::Propagate)
+                .after(bevy::camera::CameraUpdateSystems)
+                .before(bevy::ui::UiSystems::Layout),
         );
     }
 }
 
-fn shaft(scale: f32) -> GizmoConfig {
-    GizmoConfig {
-        line: GizmoLineConfig {
-            width: SHAFT * scale,
-            ..default()
-        },
-        ..default()
-    }
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "a system's arguments are its query"
-)]
-fn draw_edges(
-    mut thin: Gizmos<Thin>,
-    mut mid: Gizmos,
-    mut thick: Gizmos<Thick>,
-    document: Res<Document>,
-    theme: Res<Theme>,
-    selected: Query<&EdgeId, With<Selected>>,
-    // Its size is what the shaft makes room for: measured, not guessed.
-    labels: Query<(&EdgeId, &Transform, &TextLayoutInfo)>,
-) {
-    for (edge, from, to) in resolved_edges(&document.0) {
-        let (a, b) = edge_ends(from, edge.from_side, to, edge.to_side);
-        let color = if selected.iter().any(|picked| picked.0 == edge.id) {
-            OUTLINE
-        } else {
-            edge_color(&theme, edge)
-        };
-        let heads = (
-            edge.from_end.unwrap_or(End::None) == End::Arrow,
-            edge.to_end.unwrap_or(End::Arrow) == End::Arrow,
-        );
-        let hole = labels
-            .iter()
-            .find(|(id, _, _)| id.0 == edge.id)
-            .map(|(_, at, label)| label.size * at.scale.truncate());
-        match stroke_width(&edge.extra) {
-            Some(1) => draw_arrow(&mut thin, a, b, heads, hole, color),
-            Some(3) => draw_arrow(&mut thick, a, b, heads, hole, color),
-            _ => draw_arrow(&mut mid, a, b, heads, hole, color),
-        }
-    }
-}
-
-// A label's box in world space: the `Text2d` is centred on the edge's midpoint.
+// A label's box in world space: the text is centred on the edge's midpoint.
 // It counts as the edge for a click, because on a steep edge the text sticks out
 // far past the few pixels of reach around the shaft.
-// Its size is in layout pixels, which the raster tier blew up: the entity's own
-// scale is what puts them back.
-pub fn label_box(at: &Transform, label: &TextLayoutInfo) -> Rect {
-    Rect::from_center_size(at.translation.truncate(), label.size * at.scale.truncate())
+pub fn label_box(at: &Transform, label: &LabelSize) -> Rect {
+    Rect::from_center_size(at.translation.truncate(), label.0)
 }
 
 // The spec's colour is the edge's line, and an edge that names none follows the
@@ -122,13 +100,20 @@ pub fn edge_color(theme: &Theme, edge: &extboard_core::Edge) -> Color {
     theme.paint(edge.color.as_deref(), TEXT)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    reason = "a system's arguments are its query"
+)]
 fn spawn_edges(
     mut commands: Commands,
     document: Res<Document>,
     theme: Res<Theme>,
     raster: Res<Raster>,
     reselect: Option<Res<crate::node::Reselect>>,
+    mut materials: ResMut<Assets<LineMaterial>>,
     existing: Query<(Entity, &EdgeId, Has<Selected>)>,
+    drawn: Query<Entity, Or<(With<EdgeLine>, With<EdgeLabel>)>>,
 ) {
     // A reselect names nodes only, so it leaves no edge selected.
     let fresh = reselect.is_some_and(|reselect| reselect.0.is_some());
@@ -139,58 +124,237 @@ fn spawn_edges(
         }
         commands.entity(entity).despawn();
     }
+    for entity in &drawn {
+        commands.entity(entity).despawn();
+    }
 
     for (edge, from, to) in resolved_edges(&document.0) {
         let (a, b) = edge_ends(from, edge.from_side, to, edge.to_side);
-        // Laid out `raster` times too big and scaled back down, like the node
-        // panels: glyphs are rasterized at the size they are laid out at, so a
-        // fixed LABEL_SIZE is a bitmap the camera's zoom then stretches.
-        let at = Transform::from_translation(a.midpoint(b).extend(LABEL_Z))
-            .with_scale(Vec3::splat(1.0 / raster.0));
-        let mut spawned = commands.spawn((EdgeId(edge.id.clone()), at));
+        let Some(rank) = rank(&document.0, edge) else {
+            continue;
+        };
+        let z = ZIndex(crate::node::stack(rank).0 + 1);
+        let mut spawned = commands.spawn((
+            EdgeId(edge.id.clone()),
+            Transform::from_translation(a.midpoint(b).extend(0.0)),
+        ));
         if selected.contains(&edge.id.as_str()) {
             spawned.insert(Selected);
         }
+        if edge.label.is_some() {
+            spawned.insert(LabelSize::default());
+        }
+        // One material each: the uniforms are the edge's own geometry.
+        commands.spawn((
+            EdgeLine(edge.id.clone()),
+            Node {
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            MaterialNode(materials.add(LineMaterial {
+                paint: LinePaint::default(),
+            })),
+            z,
+            Pickable::IGNORE,
+        ));
         if let Some(label) = &edge.label {
             let face = theme.face(None, style::text_color(&edge.extra));
-            spawned.insert((
-                Text2d::new(interpolate(label, document.0.vars()).into_owned()),
+            // Laid out `raster` times too big and scaled back down, like the
+            // node panels, so the glyphs stay sharp under the zoom.
+            commands.spawn((
+                EdgeLabel(edge.id.clone()),
+                Text::new(interpolate(label, document.0.vars()).into_owned()),
                 TextFont {
                     font: face.source,
                     font_smoothing: face.smoothing,
                     ..TextFont::from_font_size(LABEL_SIZE * raster.0)
                 },
                 TextColor(face.ink),
+                TextLayout::no_wrap(),
+                Node {
+                    position_type: PositionType::Absolute,
+                    ..default()
+                },
+                z,
+                Pickable::IGNORE,
             ));
         }
     }
 }
 
-fn place_edges(
-    document: Res<Document>,
-    editing: Res<crate::text::Editing>,
-    mut edges: Query<(&EdgeId, &mut Transform, Option<&mut Visibility>)>,
-) {
+fn place_edges(document: Res<Document>, mut edges: Query<(&EdgeId, &mut Transform)>) {
     let placed: HashMap<&str, Vec3> = segments(&document.0)
-        .map(|(id, a, b)| (id, a.midpoint(b).extend(LABEL_Z)))
+        .map(|(id, a, b)| (id, a.midpoint(b).extend(0.0)))
         .collect();
-
-    for (id, mut transform, visibility) in &mut edges {
-        // The editor draws the label for as long as it is open; two of them over
-        // one midpoint is what read as a form.
-        if let Some(mut visibility) = visibility {
-            let want = if editing.edge() == Some(id.0.as_str()) {
-                Visibility::Hidden
-            } else {
-                Visibility::Inherited
-            };
-            visibility.set_if_neq(want);
-        }
+    for (id, mut transform) in &mut edges {
         let Some(&want) = placed.get(id.0.as_str()) else {
             continue;
         };
         if transform.translation != want {
             transform.translation = want;
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    reason = "a system's arguments are its query"
+)]
+fn track_lines(
+    camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
+    document: Res<Document>,
+    theme: Res<Theme>,
+    edges: Query<(&EdgeId, Has<Selected>, Option<&LabelSize>)>,
+    mut lines: Query<(
+        &EdgeLine,
+        &mut Node,
+        &mut UiTransform,
+        &mut Visibility,
+        &MaterialNode<LineMaterial>,
+    )>,
+    mut materials: ResMut<Assets<LineMaterial>>,
+) {
+    let (camera, cam_global, projection) = *camera;
+    let Projection::Orthographic(ortho) = projection else {
+        return;
+    };
+    let zoom = 1.0 / ortho.scale;
+    let state: HashMap<&str, (bool, Option<Vec2>)> = edges
+        .iter()
+        .map(|(id, picked, label)| (id.0.as_str(), (picked, label.map(|label| label.0))))
+        .collect();
+
+    for (edge, from, to) in resolved_edges(&document.0) {
+        let Some((mut node, mut transform, mut visibility, material)) = lines
+            .iter_mut()
+            .find(|(line, ..)| line.0 == edge.id)
+            .map(|(_, node, transform, visibility, material)| {
+                (node, transform, visibility, material)
+            })
+        else {
+            continue;
+        };
+        let (a, b) = edge_ends(from, edge.from_side, to, edge.to_side);
+        let (Some(sa), Some(sb)) = (
+            world_to_screen(camera, cam_global, a),
+            world_to_screen(camera, cam_global, b),
+        ) else {
+            continue;
+        };
+        let length = a.distance(b);
+        // Two nodes touching leave no line to draw, and no direction to draw it in.
+        let want = if length < f32::EPSILON {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        visibility.set_if_neq(want);
+        if want == Visibility::Hidden {
+            continue;
+        }
+
+        let (picked, label) = state.get(edge.id.as_str()).copied().unwrap_or_default();
+        let shaft = SHAFT * stroke_scale(&edge.extra);
+        let (width, height) = (
+            length * zoom,
+            (2.0 * HEAD_HALF_WIDTH * zoom).max(shaft) + 2.0 * RIM_PX,
+        );
+        let middle = sa.midpoint(sb);
+        let placed = (
+            px(middle.x - width / 2.0),
+            px(middle.y - height / 2.0),
+            px(width),
+            px(height),
+        );
+        // Any write re-runs layout, so write only what moved.
+        if (node.left, node.top, node.width, node.height) != placed {
+            (node.left, node.top, node.width, node.height) = placed;
+        }
+        let turn = UiTransform::from_rotation(Rot2::radians((sb - sa).to_angle()));
+        if *transform != turn {
+            *transform = turn;
+        }
+
+        let color = if picked {
+            OUTLINE
+        } else {
+            edge_color(&theme, edge)
+        };
+        let paint = LinePaint {
+            color: Vec4::from_array(color.to_linear().to_f32_array()),
+            length,
+            shaft,
+            hole: label.map_or(0.0, |size| {
+                box_reach(size / 2.0 + Vec2::splat(LABEL_PAD), (b - a) / length)
+            }),
+            dash: style::dash(&edge.extra).unwrap_or(extboard_core::SOLID) as f32,
+            heads: Vec2::new(
+                f32::from(edge.from_end.unwrap_or(End::None) == End::Arrow),
+                f32::from(edge.to_end.unwrap_or(End::Arrow) == End::Arrow),
+            ),
+            pad: Vec2::ZERO,
+        };
+        if materials
+            .get(&material.0)
+            .is_some_and(|line| line.paint != paint)
+            && let Some(mut line) = materials.get_mut(&material.0)
+        {
+            line.paint = paint;
+        }
+    }
+}
+
+// The label rides the edge's midpoint at the camera's zoom, and its laid-out
+// size goes back to the edge, for the gap in the line and for a click.
+#[allow(clippy::type_complexity, reason = "a system's arguments are its query")]
+fn track_labels(
+    camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
+    editing: Res<crate::text::Editing>,
+    raster: Res<Raster>,
+    mut edges: Query<(&EdgeId, &Transform, &mut LabelSize)>,
+    mut labels: Query<(
+        &EdgeLabel,
+        &mut Node,
+        &mut UiTransform,
+        &mut Visibility,
+        &ComputedNode,
+    )>,
+) {
+    let (camera, cam_global, projection) = *camera;
+    let Projection::Orthographic(ortho) = projection else {
+        return;
+    };
+    let zoom = 1.0 / ortho.scale;
+    for (label, mut node, mut transform, mut visibility, computed) in &mut labels {
+        let Some((_, at, mut size)) = edges.iter_mut().find(|(id, ..)| id.0 == label.0) else {
+            continue;
+        };
+        // The editor draws the label for as long as it is open; two of them over
+        // one midpoint is what read as a form.
+        visibility.set_if_neq(if editing.edge() == Some(label.0.as_str()) {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        });
+        let measured = computed.size() * computed.inverse_scale_factor() / raster.0;
+        if size.0 != measured {
+            size.0 = measured;
+        }
+        let Some(screen) = world_to_screen(camera, cam_global, at.translation.truncate()) else {
+            continue;
+        };
+        if (node.left, node.top) != (px(screen.x), px(screen.y)) {
+            (node.left, node.top) = (px(screen.x), px(screen.y));
+        }
+        // Back onto its own centre, then down from the raster tier to the zoom.
+        let want = UiTransform {
+            translation: Val2::percent(-50.0, -50.0),
+            scale: Vec2::splat(zoom / raster.0),
+            ..UiTransform::IDENTITY
+        };
+        if *transform != want {
+            *transform = want;
         }
     }
 }

@@ -89,7 +89,7 @@ pub(super) fn spawn_panels(
                 // Hidden rather than absent: toggling the component would move
                 // the panel between tables on every selection change.
                 Outline::new(px(OUTLINE_PX), px(0.0), Color::NONE),
-                ZIndex(rank as i32),
+                crate::node::stack(rank),
             ))
             .with_children(|parent| {
                 parent
