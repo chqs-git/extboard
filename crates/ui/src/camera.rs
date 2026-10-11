@@ -85,11 +85,13 @@ fn spawn_camera(mut commands: Commands) {
 fn pan(
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    grab: Res<crate::palette::Grab>,
     motion: Res<AccumulatedMouseMotion>,
     camera: Single<(&mut Transform, &Projection), With<Camera2d>>,
 ) {
     let dragging = buttons.pressed(MouseButton::Middle)
-        || (keys.pressed(KeyCode::Space) && buttons.pressed(MouseButton::Left));
+        || (keys.pressed(KeyCode::Space) && buttons.pressed(MouseButton::Left))
+        || grab.0;
     if !dragging || motion.delta == Vec2::ZERO {
         return;
     }

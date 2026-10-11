@@ -6,6 +6,7 @@ use crate::camera::{screen_to_world, world_to_screen};
 use crate::client::Document;
 use crate::edit::{MIN_SIZE, Reach, TIP_PX, anchor_under, created, rects, tip_under};
 use crate::node::{NodeKind, NodeRect};
+use crate::palette::Tool;
 use crate::scene::{EdgeId, label_box, nearest};
 
 // A selected edge is painted with it in scene.rs, and a selected node's panel
@@ -145,6 +146,7 @@ fn press(
     edges: Query<(Entity, &EdgeId, &Transform, Option<&TextLayoutInfo>)>,
     document: Option<Res<Document>>,
     selected: Query<Entity, With<Selected>>,
+    tool: Res<Tool>,
 ) {
     let (camera, cam_global, projection) = *camera;
     // Space+left is the camera's pan grab.
@@ -158,7 +160,8 @@ fn press(
         return;
     };
     // A press on the anchor circle itself is edit.rs's edge drag, not a sweep.
-    if anchor_under(rects(&nodes), projection, world, Reach::Grip).is_some() {
+    if *tool == Tool::Edge && anchor_under(rects(&nodes), projection, world, Reach::Grip).is_some()
+    {
         return;
     }
     // Same for the arrowhead on the end of an edge: that press is a redirect.
@@ -218,6 +221,7 @@ fn press(
 fn drag_band(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
+    tool: Res<Tool>,
     band: Option<ResMut<Band>>,
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
@@ -242,7 +246,8 @@ fn drag_band(
         return;
     };
     let rect = Rect::from_corners(band.start, world);
-    let creating = !band.additive && keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let creating = !band.additive
+        && (*tool == Tool::Node || keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]));
 
     // Screen space, from the two world corners: the band is the same overlay at
     // every zoom, like the panels it is drawn over.

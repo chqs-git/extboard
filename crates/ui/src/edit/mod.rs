@@ -5,6 +5,7 @@ use extboard_core::{Canvas, Edge as CanvasEdge, Node as CanvasNode, NodeKind, Si
 
 use crate::client::Document;
 use crate::node::{NodeId, NodeKind as Kind, NodeRect, to_canvas, to_world};
+use crate::palette::{Grab, Tool};
 use crate::scene::{draw_arrow, segments};
 use crate::select::{Selected, bounds, cursor_world, pick};
 
@@ -141,6 +142,7 @@ fn grab(
     kinds: Query<&Kind>,
     document: Option<Res<Document>>,
     selected: Query<Entity, With<Selected>>,
+    tool: Res<Tool>,
 ) {
     let (camera, cam_global, projection) = *camera;
     if !buttons.just_pressed(MouseButton::Left) || keys.pressed(KeyCode::Space) {
@@ -163,7 +165,10 @@ fn grab(
     // An edge ends on the very anchor that starts a new one, so the circle keeps
     // the pixel it is drawn on and the arrowhead around it takes the rest: one
     // gesture per visible target, neither of them needing a selection first.
-    if let Some((from, side, _)) = anchor_under(rects(&nodes), projection, world, Reach::Grip) {
+    let edging = *tool == Tool::Edge;
+    if edging
+        && let Some((from, side, _)) = anchor_under(rects(&nodes), projection, world, Reach::Grip)
+    {
         commands.insert_resource(Drag::Edge { from, side });
         return;
     }
@@ -201,6 +206,20 @@ fn grab(
     ) else {
         return;
     };
+
+    // Anywhere on a node starts an edge, from the side nearest the press.
+    if edging {
+        if let Ok((_, transform, rect)) = nodes.get(picked)
+            && let Some((from, side, _)) = nearest_anchor(
+                std::iter::once((picked, bounds(transform, rect))),
+                world,
+                f32::INFINITY,
+            )
+        {
+            commands.insert_resource(Drag::Edge { from, side });
+        }
+        return;
+    }
 
     // Mirrors select.rs: a press on an unselected node takes the selection with
     // it, so the drag set is that node alone.
@@ -463,6 +482,7 @@ fn anchors(
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(Entity, &Transform, &NodeRect)>,
     ids: Query<&NodeId>,
+    tool: Res<Tool>,
 ) {
     let (camera, cam_global, projection) = *camera;
     // The group a lone node would join if it were let go here.
@@ -533,6 +553,9 @@ fn anchors(
         _ => {}
     }
 
+    if !drawing && *tool != Tool::Edge {
+        return;
+    }
     let reach = if drawing { Reach::Drag } else { Reach::Hover };
     if let Some((_, _, at)) = anchor_under(rects(&nodes), projection, world, reach) {
         gizmos.circle_2d(at, ANCHOR_PX * ortho.scale, ANCHOR);
@@ -830,6 +853,10 @@ pub fn restacked(canvas: &mut Canvas, id: &str, to: Depth) -> bool {
     true
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
 fn cursor(
     mut commands: Commands,
     drag: Option<Res<Drag>>,
@@ -837,6 +864,8 @@ fn cursor(
     camera: Single<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     nodes: Query<(&Transform, &NodeRect)>,
     selected: Query<(Entity, &Kind), With<Selected>>,
+    tool: Res<Tool>,
+    grab: Res<Grab>,
 ) {
     let (entity, window, current) = *window;
     let (camera, cam_global, projection) = *camera;
@@ -845,8 +874,16 @@ fn cursor(
         Some(Drag::Resize { handle, .. }) => resize_cursor(*handle),
         Some(Drag::Move { .. }) => SystemCursorIcon::Grabbing,
         Some(Drag::Edge { .. } | Drag::Redirect { .. }) => SystemCursorIcon::Crosshair,
-        None => hovered_handle(window, (camera, cam_global), projection, &nodes, &selected)
-            .map_or(SystemCursorIcon::Default, resize_cursor),
+        None if grab.0 => SystemCursorIcon::Grabbing,
+        None if *tool == Tool::Pan => SystemCursorIcon::Grab,
+        None => hovered_handle(window, (camera, cam_global), projection, &nodes, &selected).map_or(
+            if *tool == Tool::Edge {
+                SystemCursorIcon::Crosshair
+            } else {
+                SystemCursorIcon::Default
+            },
+            resize_cursor,
+        ),
     };
 
     let want = CursorIcon::System(want);
