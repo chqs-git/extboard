@@ -47,6 +47,7 @@ pub(super) struct Bleed;
 pub(super) fn spawn_panels(
     mut commands: Commands,
     document: Res<Document>,
+    vars: Res<crate::vars::Vars>,
     editing: Res<Editing>,
     theme: Res<Theme>,
     raster: Res<Raster>,
@@ -115,7 +116,7 @@ pub(super) fn spawn_panels(
                             &theme,
                             &assets,
                             raster,
-                            document.0.vars(),
+                            &vars.0,
                             carried.as_ref(),
                             parent,
                         )

@@ -61,6 +61,7 @@ impl Plugin for ScenePlugin {
                     .run_if(
                         resource_exists::<Document>.and_then(
                             resource_changed::<Document>
+                                .or_else(resource_changed::<crate::vars::Vars>)
                                 .or_else(resource_changed::<Raster>)
                                 .or_else(resource_changed::<Theme>),
                         ),
@@ -102,6 +103,7 @@ pub fn edge_color(theme: &Theme, edge: &extboard_core::Edge) -> Color {
 fn spawn_edges(
     mut commands: Commands,
     document: Res<Document>,
+    vars: Res<crate::vars::Vars>,
     theme: Res<Theme>,
     raster: Res<Raster>,
     reselect: Option<Res<crate::node::Reselect>>,
@@ -154,7 +156,7 @@ fn spawn_edges(
             let face = theme.face(None, style::text_color(&edge.extra));
             commands.spawn((
                 EdgeLabel(edge.id.clone()),
-                Text::new(interpolate(label, document.0.vars()).into_owned()),
+                Text::new(interpolate(label, &vars.0).into_owned()),
                 TextFont {
                     font: face.source,
                     font_smoothing: face.smoothing,

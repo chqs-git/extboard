@@ -100,11 +100,13 @@ fn router(state: AppState, dir: PathBuf) -> Router {
         .with_state(state)
 }
 
-// `/f` is for images and fonts: a raw `.canvas` or `.password` would walk round
+// `/f` is for images, fonts and `data` JSON: a raw `.canvas` or `.password` would walk round
 // the lock. The raw path is enough, since decoding never changes its tail.
 async fn media_only(request: Request, next: Next) -> Response {
     match request.uri().path().strip_prefix("/f/") {
-        Some(file) if !is_image(file) && !is_font(file) => StatusCode::NOT_FOUND.into_response(),
+        Some(file) if !is_image(file) && !is_font(file) && !file.ends_with(".json") => {
+            StatusCode::NOT_FOUND.into_response()
+        }
         _ => next.run(request).await,
     }
 }
@@ -532,6 +534,13 @@ mod tests {
             .unwrap();
         assert_eq!(served.status(), StatusCode::OK);
         assert_eq!(served.headers()[CONTENT_TYPE], "image/png");
+
+        std::fs::write(dir.join("monday.json"), b"{}").unwrap();
+        let data = app()
+            .oneshot(Request::get("/f/monday.json").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(data.status(), StatusCode::OK, "a `data` file is served");
 
         for path in ["/f/../secret", "/f/%2e%2e/secret", "/f/images/../../secret"] {
             let got = app()

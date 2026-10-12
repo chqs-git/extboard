@@ -18,10 +18,25 @@ impl Canvas {
             .unwrap_or(&EMPTY)
     }
 
+    pub fn data_files(&self) -> Vec<(&str, &str)> {
+        let Some(data) = self.extra.get("data").and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        data.iter()
+            .filter_map(|(name, file)| Some((name.as_str(), file.as_str()?)))
+            .collect()
+    }
+
     pub fn set_var(&mut self, name: &str, value: &str) {
         object_mut(&mut self.extra, "vars")
             .insert(name.to_owned(), Value::String(value.to_owned()));
     }
+}
+
+// On a shared board `data` is someone else's input: only a file sitting
+// directly in the spaces dir is ever asked for.
+pub fn plain_file(file: &str) -> bool {
+    !matches!(file, "" | "." | "..") && !file.contains(['/', '\\'])
 }
 
 pub fn interpolate<'a>(text: &'a str, vars: &Vars) -> Cow<'a, str> {
@@ -116,6 +131,27 @@ mod tests {
             serde_json::from_str(r#"{"vars":{"City":"Porto"},"nodes":[],"edges":[]}"#).unwrap();
         assert_eq!(interpolate("{{City}}", canvas.vars()), "Porto");
         assert!(Canvas::default().vars().is_empty());
+    }
+
+    #[test]
+    fn a_data_file_is_a_plain_name_in_the_spaces_dir() {
+        let canvas: Canvas = serde_json::from_str(
+            r#"{"data":{"Monday":"monday.json","Bad":7},"nodes":[],"edges":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(canvas.data_files(), [("Monday", "monday.json")]);
+        assert!(plain_file("monday.json"));
+        for file in [
+            "",
+            ".",
+            "..",
+            "../x.json",
+            "a/b.json",
+            "..\\x.json",
+            "/etc/x.json",
+        ] {
+            assert!(!plain_file(file), "{file}");
+        }
     }
 
     #[test]

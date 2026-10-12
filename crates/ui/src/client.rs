@@ -264,6 +264,7 @@ fn show_notice(
             position_type: PositionType::Absolute,
             bottom: Val::Px(8.0),
             left: Val::Px(8.0),
+            right: Val::Px(8.0),
             ..default()
         },
     ));
