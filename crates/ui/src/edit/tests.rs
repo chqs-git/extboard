@@ -467,13 +467,3 @@ fn the_ends_hold_and_a_node_that_cannot_move_is_not_a_change() {
     assert!(!restacked(&mut canvas, "gone", Depth::Front), "a stale id");
     assert_eq!(ids(&canvas), ["n", "b", "c", "d"]);
 }
-
-// What a drag's release does to the set it carried, one node at a time.
-#[test]
-fn raising_a_drag_set_in_its_own_order_leaves_the_rest_alone() {
-    let mut canvas = four();
-    for id in ["n", "c"] {
-        restacked(&mut canvas, id, Depth::Front);
-    }
-    assert_eq!(ids(&canvas), ["b", "d", "n", "c"]);
-}

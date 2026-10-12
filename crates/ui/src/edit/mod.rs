@@ -110,7 +110,8 @@ impl Plugin for EditPlugin {
                             .and_then(not(crate::text::editing))
                             .and_then(not(crate::shape::typing))
                             .and_then(not(crate::theme::typing))
-                            .and_then(not(crate::spaces::typing)),
+                            .and_then(not(crate::spaces::typing))
+                            .and_then(not(crate::lock::typing)),
                     ),
                 cursor,
             )
@@ -786,21 +787,11 @@ fn release(
         return;
     }
     match (drag.as_deref(), document) {
-        // On release rather than on the press: a restack respawns every node, and
-        // the drag holds the entities it is moving. A press that moved nothing is a
-        // selection click, and leaves the depth alone for the panel to set.
         (Some(Drag::Move { start, members, .. }), Some(mut document))
             if start
                 .iter()
                 .any(|&(entity, from)| moved_from(&nodes, entity, from)) =>
         {
-            // In the drag's own order, which puts a group behind the contents it
-            // carried along.
-            for &(entity, _) in start {
-                if let Ok((id, _)) = nodes.get(entity) {
-                    restacked(&mut document.0, &id.0, Depth::Front);
-                }
-            }
             // The drag has refitted every group already; only a join is left.
             if let [(entity, _)] = start[..]
                 && let Ok((id, _)) = nodes.get(entity)

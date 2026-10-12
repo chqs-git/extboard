@@ -2,6 +2,8 @@ use bevy::prelude::*;
 use ehttp::streaming::Part;
 use extboard_core::Canvas;
 use std::ops::ControlFlow;
+
+use crate::lock::{Locked, keyed};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -118,6 +120,8 @@ struct ErrorText;
 enum Update {
     Loaded(String, Canvas, String),
     Changed(String, String),
+    // The space and extd's reason: locked, or the password sent was wrong.
+    Locked(String, String),
     Disconnected,
     Failed(String),
 }
@@ -179,7 +183,14 @@ fn connect(time: Res<Time>, mut live: ResMut<Live>, rev: Res<Rev>, space: Res<Sp
 // is gone, and an empty canvas is what clears the board while the new one is in
 // the air. The stream stays open -- it carries every space, and `apply` is what
 // picks ours out of it.
-fn switch(mut commands: Commands, space: Res<Space>, mut rev: ResMut<Rev>, live: Res<Live>) {
+fn switch(
+    mut commands: Commands,
+    space: Res<Space>,
+    mut rev: ResMut<Rev>,
+    mut locked: ResMut<Locked>,
+    live: Res<Live>,
+) {
+    locked.0 = None;
     rev.0.clear();
     commands.insert_resource(Document(Canvas::default()));
     // Not on the first frame: `connect` has not subscribed yet, and its own
@@ -194,6 +205,7 @@ fn apply(
     mut live: ResMut<Live>,
     mut rev: ResMut<Rev>,
     mut notice: ResMut<Notice>,
+    mut locked: ResMut<Locked>,
     space: Res<Space>,
 ) {
     let batch = std::mem::take(&mut *lock(&live.inbox));
@@ -217,6 +229,7 @@ fn apply(
                 }
             }
             Update::Changed(..) => {}
+            Update::Locked(id, reason) => locked.0 = Some((id, reason)),
             Update::Disconnected => {
                 live.subscribed = false;
                 live.retry.reset();
@@ -261,7 +274,7 @@ pub fn space_url(space: &str) -> String {
 }
 
 fn fetch(inbox: &Inbox, rev: &str, space: &str) {
-    let mut request = ehttp::Request::get(space_url(space));
+    let mut request = keyed(ehttp::Request::get(space_url(space)));
     if !rev.is_empty() {
         request
             .headers
@@ -292,6 +305,13 @@ fn loaded(space: &str, result: ehttp::Result<ehttp::Response>) -> Option<Update>
     if response.status == 304 {
         return None;
     }
+    if response.status == 401 {
+        let reason = serde_json::from_slice::<serde_json::Value>(&response.bytes)
+            .ok()
+            .and_then(|body| Some(body.get("error")?.as_str()?.to_owned()))
+            .unwrap_or_else(|| format!("{space} is locked"));
+        return Some(Update::Locked(space.to_owned(), reason));
+    }
     if !response.ok {
         return Some(Update::Failed(format!("extd returned {}", response.status)));
     }
@@ -307,7 +327,7 @@ impl Update {
     fn space(&self) -> Option<&str> {
         match self {
             // A lagged stream names no space, so it is news about ours too.
-            Update::Loaded(space, ..) | Update::Changed(space, _) => {
+            Update::Loaded(space, ..) | Update::Changed(space, _) | Update::Locked(space, _) => {
                 (!space.is_empty()).then_some(space.as_str())
             }
             Update::Disconnected | Update::Failed(_) => None,
@@ -440,6 +460,14 @@ mod tests {
             "{got:?}"
         );
         assert!(loaded("a", Ok(response(304, ""))).is_none());
+        let locked = loaded(
+            "a",
+            Ok(response(401, r#"{"error":"wrong password for a"}"#)),
+        );
+        assert!(
+            matches!(&locked, Some(Update::Locked(space, why)) if space == "a" && why == "wrong password for a"),
+            "{locked:?}"
+        );
     }
 
     #[test]

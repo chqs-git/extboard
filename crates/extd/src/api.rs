@@ -1,13 +1,15 @@
 use crate::events::{Events, events, watch};
 use crate::store::{Store, StoreError, secs};
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::header::{CONTENT_TYPE, ETAG, IF_MATCH, IF_NONE_MATCH};
+use axum::extract::{DefaultBodyLimit, Path, Request, State};
+use axum::http::header::{CONTENT_TYPE, COOKIE, ETAG, IF_MATCH, IF_NONE_MATCH, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderName, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::middleware::{Next, from_fn};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post, put};
-use axum::{Json, Router};
-use extboard_core::{Canvas, is_font, is_image, object_mut, rev, validate};
+use axum::{Form, Json, Router};
+use extboard_core::{Canvas, is_font, is_image, object_mut, rev, url_path, validate};
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -87,13 +89,102 @@ fn router(state: AppState, dir: PathBuf) -> Router {
         .route("/api/spaces/{id}", post(create_space))
         .route("/api/spaces/{id}/rename", post(rename_space))
         .route("/api/spaces/{id}/path", get(space_path))
+        .route("/api/spaces/{id}/unlock", post(unlock))
         .route("/api/events", get(events))
         .route(
             "/api/files/{name}",
             post(upload).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)),
         )
         .nest_service("/f", ServeDir::new(dir))
+        .layer(from_fn(media_only))
         .with_state(state)
+}
+
+// `/f` is for images and fonts: a raw `.canvas` or `.password` would walk round
+// the lock. The raw path is enough, since decoding never changes its tail.
+async fn media_only(request: Request, next: Next) -> Response {
+    match request.uri().path().strip_prefix("/f/") {
+        Some(file) if !is_image(file) && !is_font(file) => StatusCode::NOT_FOUND.into_response(),
+        _ => next.run(request).await,
+    }
+}
+
+// What `extd pull`/`push` and the desktop app send, once per password they
+// hold. The browser sends the cookie `unlock` set.
+const PASSWORD: &str = "x-extboard-password";
+
+// The nearest lock on `id` or its parents, and whether the request holds its key.
+async fn guard(app: &App, id: &str, headers: &HeaderMap) -> Result<(), StoreError> {
+    let Some((owner, password)) = lock_on(app, id).await? else {
+        return Ok(());
+    };
+    let cookie = cookie(headers, &cookie_name(&owner));
+    let mut sent = headers.get_all(PASSWORD).iter().peekable();
+    let tried = sent.peek().is_some();
+    if cookie.is_some_and(|sent| same(sent.as_bytes(), hex(&password).as_bytes()))
+        || sent.any(|sent| same(sent.as_bytes(), password.as_bytes()))
+    {
+        return Ok(());
+    }
+    Err(match (cookie, tried) {
+        (None, false) => StoreError::Locked(owner),
+        _ => StoreError::WrongPassword(owner),
+    })
+}
+
+async fn lock_on(app: &App, id: &str) -> Result<Option<(String, String)>, StoreError> {
+    for owner in lineage(app, id).await?.0 {
+        if let Some(password) = app.store.password(&owner)? {
+            return Ok(Some((owner, password)));
+        }
+    }
+    Ok(None)
+}
+
+// The locked page's form posts here. The cookie holds whatever was typed, so
+// a wrong password comes back as a 401 that says so.
+async fn unlock(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Result<Response, StoreError> {
+    let back = Redirect::to(&format!("/s/{}", url_path(&id)));
+    let Some((owner, password)) = lock_on(&app, &id).await? else {
+        return Ok(back.into_response());
+    };
+    let sent = form.get("password").map_or("", |sent| sent.trim());
+    if !same(sent.as_bytes(), password.as_bytes()) {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    let cookie = format!(
+        "{}={}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict",
+        cookie_name(&owner),
+        hex(sent)
+    );
+    Ok(([(SET_COOKIE, cookie)], back).into_response())
+}
+
+// Hex, because an id or a password can hold what a cookie cannot.
+fn cookie_name(owner: &str) -> String {
+    format!("extboard-{}", hex(owner))
+}
+
+fn hex(text: &str) -> String {
+    text.bytes().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .find_map(|pair| pair.trim().strip_prefix(name)?.strip_prefix('='))
+}
+
+// Constant time, so a wrong guess does not say how far it got.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 async fn health(State(app): State<AppState>) -> Result<&'static str, StatusCode> {
@@ -157,16 +248,28 @@ async fn child_of(app: &App, parent: &str) -> Result<Canvas, StoreError> {
     Ok(canvas)
 }
 
-// Root first, ending at `id`. A parent that is gone ends the walk; a loop is
-// no hierarchy at all, so it is the space alone.
+// Root first, ending at `id`. A loop is no hierarchy at all, so it is the
+// space alone.
 async fn space_path(
     State(app): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, StoreError> {
-    let mut path = vec![id.clone()];
+    guard(&app, &id, &headers).await?;
+    let (mut path, looped) = lineage(&app, &id).await?;
+    if looped {
+        return Ok(Json(vec![id]));
+    }
+    path.reverse();
+    Ok(Json(path))
+}
+
+// `id` then its parents, until one is gone or comes round again; `true` if one did.
+async fn lineage(app: &App, id: &str) -> Result<(Vec<String>, bool), StoreError> {
+    let mut path = vec![id.to_owned()];
     let mut parent = app
         .store
-        .space(&id)?
+        .space(id)?
         .read()
         .await
         .load()?
@@ -174,7 +277,7 @@ async fn space_path(
         .map(str::to_owned);
     while let Some(next) = parent {
         if path.contains(&next) {
-            return Ok(Json(vec![id]));
+            return Ok((path, true));
         }
         let Ok(canvas) = app.store.space(&next)?.read().await.load() else {
             break;
@@ -182,8 +285,7 @@ async fn space_path(
         parent = canvas.parent().map(str::to_owned);
         path.push(next);
     }
-    path.reverse();
-    Ok(Json(path))
+    Ok((path, false))
 }
 
 async fn get_space(
@@ -191,6 +293,7 @@ async fn get_space(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, StoreError> {
+    guard(&app, &id, &headers).await?;
     let canvas = app.store.space(&id)?.read().await.load()?;
 
     let etag = format!("\"{}\"", rev(&canvas));
@@ -214,9 +317,13 @@ async fn get_space(
 async fn create_space(
     State(app): State<AppState>,
     Path(name): Path<String>,
+    headers: HeaderMap,
     parent: String,
 ) -> Result<Response, StoreError> {
     let parent = parent.trim();
+    if !parent.is_empty() {
+        guard(&app, parent, &headers).await?;
+    }
     let canvas = child_of(&app, parent).await?;
     let id = match parent {
         "" => name,
@@ -238,8 +345,10 @@ async fn create_space(
 async fn rename_space(
     State(app): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     to: String,
 ) -> Result<StatusCode, StoreError> {
+    guard(&app, &id, &headers).await?;
     let to = to.trim();
     app.store.rename(&id, to).await?;
     for child in app.store.list()? {
@@ -299,6 +408,7 @@ async fn put_space(
     if headers.get(IF_MATCH).is_none() {
         return Ok(StatusCode::PRECONDITION_REQUIRED.into_response());
     }
+    guard(&app, &id, &headers).await?;
 
     let space = app.store.space(&id)?;
     let mut guard = space.write().await;
@@ -350,6 +460,7 @@ impl IntoResponse for StoreError {
             StoreError::BadId(_) => StatusCode::BAD_REQUEST,
             StoreError::NotFound(_) => StatusCode::NOT_FOUND,
             StoreError::Exists(_) => StatusCode::CONFLICT,
+            StoreError::Locked(_) | StoreError::WrongPassword(_) => StatusCode::UNAUTHORIZED,
             // A corrupt file or an unreadable directory is ours.
             StoreError::Parse { .. } | StoreError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -475,6 +586,88 @@ mod tests {
         assert!(!root.join("secret.png").exists());
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // One password, set by hand beside the canvas, locks the space and every
+    // space inside it; the cookie `unlock` sets is the browser's key.
+    #[tokio::test]
+    async fn a_password_locks_a_space_and_its_inner_spaces() {
+        let dir = std::env::temp_dir().join("extboard-lock-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.canvas"), "{}").unwrap();
+        std::fs::write(dir.join("a_b.canvas"), r#"{"extboard":{"parent":"a"}}"#).unwrap();
+        std::fs::write(dir.join("open.canvas"), "{}").unwrap();
+        std::fs::write(dir.join("a.password"), "s3cret; x\n").unwrap();
+        let app = || router(state(dir.clone()), dir.clone());
+        let get = async |path: &str, header: Option<(&str, &str)>| {
+            let mut request = Request::get(path);
+            if let Some((name, value)) = header {
+                request = request.header(name, value);
+            }
+            app()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status()
+        };
+        let unlock = async |password: &str| {
+            let response = app()
+                .oneshot(
+                    Request::post("/api/spaces/a_b/unlock")
+                        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .body(Body::from(format!("password={password}")))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.headers()["location"], "/s/a_b");
+            let cookie = response.headers()[SET_COOKIE].to_str().unwrap();
+            cookie.split(';').next().unwrap().to_owned()
+        };
+
+        assert_eq!(get("/api/spaces/open", None).await, StatusCode::OK);
+        for path in ["/api/spaces/a", "/api/spaces/a_b", "/api/spaces/a_b/path"] {
+            assert_eq!(get(path, None).await, StatusCode::UNAUTHORIZED, "{path}");
+        }
+        let wrong = unlock("nope").await;
+        assert_eq!(
+            get("/api/spaces/a_b", Some(("cookie", &wrong))).await,
+            StatusCode::UNAUTHORIZED
+        );
+        let right = unlock("s3cret%3B+x").await;
+        assert_eq!(
+            get(
+                "/api/spaces/a_b",
+                Some(("cookie", &format!("other=1; {right}")))
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            get("/api/spaces/a", Some((PASSWORD, "s3cret; x"))).await,
+            StatusCode::OK
+        );
+        let two = app()
+            .oneshot(
+                Request::get("/api/spaces/a")
+                    .header(PASSWORD, "other space's")
+                    .header(PASSWORD, "s3cret; x")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            two.status(),
+            StatusCode::OK,
+            "any one password sent is enough"
+        );
+        for path in ["/f/a.canvas", "/f/a.password", "/f/a%2Ecanvas"] {
+            assert_eq!(get(path, None).await, StatusCode::NOT_FOUND, "{path}");
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // `oneshot` feeds one request straight into the Router and returns the

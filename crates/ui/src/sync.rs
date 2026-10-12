@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::client::{Document, Notice, Rev, Space, etag_rev, space_url};
+use crate::lock::keyed;
 
 // A save is the whole document, so the only thing that makes it cheap is not
 // making many: half a second of quiet, however the document was changed.
@@ -209,7 +210,7 @@ fn clear(notice: &mut ResMut<Notice>) {
 
 fn put(inbox: &Inbox, canvas: &Canvas, base: &str, space: &str) {
     let inbox = inbox.clone();
-    ehttp::fetch(request(canvas, base, space), move |result| {
+    ehttp::fetch(keyed(request(canvas, base, space)), move |result| {
         lock(&inbox).push(replied(result));
     });
 }

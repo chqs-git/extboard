@@ -132,8 +132,7 @@ pub fn pull(file: &Path, space: Option<&str>, server: Option<&str>) -> Result<()
     let (server, id) = (base_url(server), space_id(file, space)?);
     let url = format!("{server}/api/spaces/{id}");
 
-    let mut response = agent()
-        .get(&url)
+    let mut response = with_password(agent().get(&url))
         .call()
         .map_err(|e| format!("{url}: {e}"))?;
     let (rev, status) = (rev_of(&response), response.status().as_u16());
@@ -162,8 +161,7 @@ pub fn push(
     validated(file, &canvas)?;
 
     let url = format!("{server}/api/spaces/{id}");
-    let mut response = agent()
-        .put(&url)
+    let mut response = with_password(agent().put(&url))
         .header("Content-Type", "application/json")
         .header("If-Match", format!("\"{base}\""))
         .send(canvas.to_pretty_string())
@@ -188,6 +186,14 @@ fn agent() -> ureq::Agent {
         .http_status_as_error(false)
         .build()
         .into()
+}
+
+// A locked space's password, as `api::guard` reads it off a request.
+fn with_password<B>(request: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+    match std::env::var("EXTBOARD_PASSWORD") {
+        Ok(password) => request.header("x-extboard-password", password),
+        Err(_) => request,
+    }
 }
 
 // `--server`, else EXTBOARD_SERVER, resolved the way ui/src/client.rs does it.

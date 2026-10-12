@@ -36,6 +36,12 @@ pub enum StoreError {
         source: serde_json::Error,
     },
 
+    #[error("{0} is locked")]
+    Locked(String),
+
+    #[error("wrong password for {0}")]
+    WrongPassword(String),
+
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -139,7 +145,25 @@ impl Store {
             return Err(StoreError::Exists(to.to_string()));
         }
         fs::rename(&source.path, &target.path)?;
-        Ok(())
+        match fs::rename(self.password_file(from), self.password_file(to)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
+    }
+
+    // Set by hand on the server: `echo secret > <dir>/<id>.password`. `/f` never
+    // serves it, and a space inside this one is locked by it too.
+    pub fn password(&self, id: &str) -> Result<Option<String>> {
+        validate_id(id)?;
+        match fs::read_to_string(self.password_file(id)) {
+            Ok(password) => Ok(Some(password.trim().to_owned())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn password_file(&self, id: &str) -> PathBuf {
+        self.dir.join(format!("{id}.password"))
     }
 
     // What nothing reaches: an inner space no other space links to, then the
