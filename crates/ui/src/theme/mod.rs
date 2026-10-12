@@ -198,6 +198,7 @@ pub struct DialMaterial {
 struct DialPaint {
     hue: f32,
     strip: f32,
+    pad: Vec2,
 }
 
 impl UiMaterial for DialMaterial {
@@ -1133,6 +1134,7 @@ fn dial(
                 dial: DialPaint {
                     hue,
                     strip: f32::from(which == Dial::Hue),
+                    pad: Vec2::ZERO,
                 },
             })),
             // A child, so it draws over the material and positions in its box.

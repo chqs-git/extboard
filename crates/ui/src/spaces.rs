@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::client::{Document, Notice, Space, base_url, space_url};
+use crate::lock::keyed;
 use crate::node::{body_color, outline_color};
 use crate::select::PanelRoot;
 use crate::theme::{DARK, Theme};
@@ -23,9 +24,9 @@ const PAD: f32 = 24.0;
 // Clear of the theme panel below it, which starts at 30.
 const CHIP_TOP: f32 = 8.0;
 
-const TILE_BG: Color = Color::srgb(0.16, 0.17, 0.21);
+pub const TILE_BG: Color = Color::srgb(0.16, 0.17, 0.21);
 const HOVER: Color = Color::srgb(0.22, 0.24, 0.3);
-const EDGE: Color = Color::srgb(0.25, 0.27, 0.32);
+pub const EDGE: Color = Color::srgb(0.25, 0.27, 0.32);
 const EDGE_HOVER: Color = Color::srgb(0.45, 0.5, 0.6);
 // Under a tile's name, so it reads over the map.
 const SHADE: Color = Color::srgba(0.0, 0.0, 0.0, 0.6);
@@ -35,7 +36,7 @@ const SHADE: Color = Color::srgba(0.0, 0.0, 0.0, 0.6);
 const MAP_SCALE: (f32, f32) = (0.02, 0.25);
 // Room around the content inside the tile.
 const MAP_FILL: f32 = 0.85;
-const FG: Color = Color::srgb(0.86, 0.88, 0.92);
+pub const FG: Color = Color::srgb(0.86, 0.88, 0.92);
 const LABEL: Color = Color::srgb(0.45, 0.5, 0.55);
 
 pub struct SpacesPlugin;
@@ -181,7 +182,7 @@ fn only_link(text: &str) -> Option<String> {
 
 fn fetch(pending: &Pending, id: &str) {
     let (inbox, id) = (pending.0.clone(), id.to_owned());
-    ehttp::fetch(ehttp::Request::get(space_url(&id)), move |result| {
+    ehttp::fetch(keyed(ehttp::Request::get(space_url(&id))), move |result| {
         // A map is a nicety: a space that will not load is a plain tile.
         let canvas = result
             .ok()
@@ -201,7 +202,7 @@ fn refresh(pending: Res<Pending>, space: Res<Space>) {
     });
     if let Some(id) = space.id() {
         let (inbox, id) = (pending.0.clone(), id.to_owned());
-        let request = ehttp::Request::get(format!("{}/path", space_url(&id)));
+        let request = keyed(ehttp::Request::get(format!("{}/path", space_url(&id))));
         ehttp::fetch(request, move |result| {
             let path = result
                 .ok()
@@ -238,7 +239,10 @@ fn create(pending: &Pending) {
 // The server makes the id, `<parent>_<name>`, and answers with it.
 fn create_inner(pending: &Pending, parent: String, name: String, at: Vec2) {
     let inbox = pending.0.clone();
-    let request = ehttp::Request::post(space_url(&name), parent.clone().into());
+    let request = keyed(ehttp::Request::post(
+        space_url(&name),
+        parent.clone().into(),
+    ));
     ehttp::fetch(request, move |result| {
         lock(&inbox).push(made_inner(parent, name, at, result));
     });
@@ -296,7 +300,10 @@ fn created(result: ehttp::Result<ehttp::Response>) -> Result<String, String> {
 
 fn rename(pending: &Pending, from: String, to: String) {
     let inbox = pending.0.clone();
-    let request = ehttp::Request::post(format!("{}/rename", space_url(&from)), to.clone().into());
+    let request = keyed(ehttp::Request::post(
+        format!("{}/rename", space_url(&from)),
+        to.clone().into(),
+    ));
     ehttp::fetch(request, move |result| {
         lock(&inbox).push(renamed(from, to, result));
     });

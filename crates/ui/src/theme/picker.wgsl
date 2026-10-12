@@ -6,10 +6,8 @@ struct Dial {
     hue: f32,
     // Zero draws the plane, one the hue strip.
     strip: f32,
-#ifdef SIXTEEN_BYTE_ALIGNMENT
     // WebGL2 wants the struct rounded up to sixteen bytes.
-    _webgl2_padding: vec2<f32>,
-#endif
+    pad: vec2<f32>,
 }
 
 @group(1) @binding(0)

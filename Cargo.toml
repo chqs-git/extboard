@@ -26,7 +26,7 @@ tokio-stream = { version = "0.1", default-features = false, features = ["sync"] 
 notify     = { version = "8", default-features = false, features = ["macos_fsevent"] }
 # http1 only: nothing reaches us except over loopback and Tailscale's proxy,
 # and h2 would buy nothing for a single client.
-axum       = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+axum       = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "form"] }
 # Test-only: `oneshot` drives the Router without binding a socket.
 tower      = { version = "0.5", default-features = false, features = ["util"] }
 # The wasm bundle: `fs` serves it, `compression-br` squeezes it on the way out.

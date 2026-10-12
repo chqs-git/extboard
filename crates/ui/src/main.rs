@@ -4,6 +4,7 @@ mod dropdown_menu;
 mod edit;
 mod hud;
 mod icon;
+mod lock;
 mod node;
 mod palette;
 mod scene;
@@ -74,6 +75,7 @@ fn main() {
             // Nested: `Plugins` is implemented up to a tuple of fifteen.
             (
                 icon::IconPlugin,
+                lock::LockPlugin,
                 palette::PalettePlugin,
                 tip::TipPlugin,
                 undo::UndoPlugin,

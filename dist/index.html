@@ -9,8 +9,8 @@
      `rustc --target wasm32-unknown-unknown --print cfg` reports. -->
 
 <script type="module">
-import init, * as bindings from '/extboard-ui-84cab4fcb118867f.js';
-const wasm = await init({ module_or_path: '/extboard-ui-84cab4fcb118867f_bg.wasm' });
+import init, * as bindings from '/extboard-ui-1c6f98a2e920310b.js';
+const wasm = await init({ module_or_path: '/extboard-ui-1c6f98a2e920310b_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -26,6 +26,6 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
   /* `touch-action` and not `user-scalable=no`, which Safari ignores. */
   canvas { display: block; touch-action: none; }
 </style>
-<link rel="modulepreload" href="/extboard-ui-84cab4fcb118867f.js" crossorigin="anonymous" integrity="sha384-szCUo9mpZ/AwYbDm/gQCZJINW9lSY7UzsA6CwMqcCjp8AMuZVX7u3CriYrdw5qTR"><link rel="preload" href="/extboard-ui-84cab4fcb118867f_bg.wasm" crossorigin="anonymous" integrity="sha384-pKhk2cU3JTxVQh/D5IQ9v1dTYHCzHspOiOIVZwZ2VFTZMVsH6io+UQUbDy2aDkXb" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/extboard-ui-1c6f98a2e920310b.js" crossorigin="anonymous" integrity="sha384-IfdPs4NL4GUrWYqD77bAUaEJFr5e/wEVSBNTF8AyeEAPTF3XAqAzKF1Mpp8uS3bk"><link rel="preload" href="/extboard-ui-1c6f98a2e920310b_bg.wasm" crossorigin="anonymous" integrity="sha384-x+4J8p73NxtQMVCrQvQNO9Bv25FFFhwcek5gLntK1yR5cQnsPXxAW6O9cg3nlJkn" as="fetch" type="application/wasm"></head>
 <body></body>
 </html>
