@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use extboard_core::{plain_file, url_path};
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::client::{Document, Notice, base_url};
@@ -12,7 +13,7 @@ pub struct Vars(pub extboard_core::Vars);
 type Arrival = (String, String, Result<Value, String>);
 
 #[derive(Resource, Default)]
-struct Data {
+pub struct Data {
     loaded: Map<String, Value>,
     requested: Vec<(String, String)>,
     inbox: Arc<Mutex<Vec<Arrival>>>,
@@ -97,6 +98,15 @@ fn receive(mut data: ResMut<Data>, mut notice: ResMut<Notice>) {
             }
             Err(e) => notice.0 = Some(format!("data {name} ({file}): {e}")),
         }
+    }
+}
+
+impl Data {
+    pub fn by_file(&self) -> HashMap<String, Option<Value>> {
+        self.requested
+            .iter()
+            .map(|(name, file)| (file.clone(), self.loaded.get(name).cloned()))
+            .collect()
     }
 }
 
