@@ -17,6 +17,7 @@ mod text;
 mod theme;
 mod tip;
 mod undo;
+mod vars;
 #[cfg(test)]
 mod wgsl;
 
@@ -79,6 +80,7 @@ fn main() {
                 palette::PalettePlugin,
                 tip::TipPlugin,
                 undo::UndoPlugin,
+                vars::VarsPlugin,
             ),
         ))
         .run();

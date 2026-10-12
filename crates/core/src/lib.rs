@@ -26,4 +26,4 @@ pub use theme::{
     PRIMARY, PRIMARY_TEXT, ROLES, SECONDARY, SECONDARY_TEXT, TEXT, Theme,
 };
 pub use validate::validate;
-pub use vars::{Vars, interpolate};
+pub use vars::{Vars, interpolate, plain_file};

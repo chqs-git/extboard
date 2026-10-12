@@ -120,6 +120,7 @@ impl Plugin for TextPlugin {
                     (spawn_panels, spawn_label_editor).chain().run_if(
                         resource_exists::<Document>.and_then(
                             resource_changed::<Document>
+                                .or_else(resource_changed::<crate::vars::Vars>)
                                 .or_else(resource_changed::<Editing>)
                                 .or_else(resource_changed::<Raster>)
                                 .or_else(resource_changed::<crate::theme::Theme>),
