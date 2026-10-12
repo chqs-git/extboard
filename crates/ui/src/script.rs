@@ -74,6 +74,7 @@ struct Pending {
     // the next slot's value, and then two clients fight over the node forever.
     at: i64,
     colors: Vec<String>,
+    data: HashMap<String, Option<serde_json::Value>>,
 }
 
 // An `every()` registration. The interval cuts the wall clock into slots and
@@ -183,6 +184,7 @@ impl Plugin for ScriptPlugin {
             // `tick` writes it and `sync` reads it; either plugin may be the
             // one that got added, so neither assumes the other did this.
             .init_resource::<crate::sync::Ticked>()
+            .init_resource::<crate::vars::Data>()
             .add_systems(
                 PreUpdate,
                 swallow
@@ -193,6 +195,9 @@ impl Plugin for ScriptPlugin {
             .add_systems(
                 Update,
                 (
+                    feed.run_if(
+                        resource_exists::<Document>.and_then(resource_changed::<crate::vars::Data>),
+                    ),
                     recompile.run_if(resource_exists_and_changed::<Document>),
                     (
                         toggle_sidebar,
@@ -535,6 +540,18 @@ fn engine(pending: &Arc<Mutex<Pending>>) -> Engine {
     );
 
     let cell = pending.clone();
+    engine.register_fn(
+        "read_json",
+        move |file: &str| -> Result<rhai::Dynamic, Box<EvalAltResult>> {
+            match lock(&cell).data.get(file) {
+                Some(Some(value)) => rhai::serde::to_dynamic(value),
+                Some(None) => Err(format!("read_json: {file} has not loaded").into()),
+                None => Err(format!("read_json: {file} is not in the data block").into()),
+            }
+        },
+    );
+
+    let cell = pending.clone();
     engine.register_fn("move_node", move |node: &str, x: i64, y: i64| {
         lock(&cell)
             .effects
@@ -708,6 +725,13 @@ fn thrown(e: &rhai::EvalAltResult) -> String {
 
 // Script errors stay on the script (the sidebar says which one and why), so
 // nothing here reaches for the canvas notice any more.
+// A top level that read a file before it landed threw, and only a rerun clears that.
+fn feed(data: Res<crate::vars::Data>, mut script: ResMut<Script>, mut document: ResMut<Document>) {
+    lock(&script.pending).data = data.by_file();
+    script.scripts.clear();
+    script.load_all(&scripts(&document.0), &mut document.0);
+}
+
 fn recompile(mut script: ResMut<Script>, mut document: ResMut<Document>) {
     let wanted = scripts(&document.0);
     if script.stale(&wanted) {
@@ -1271,7 +1295,7 @@ fn list_body(
 
 // Everything a handler can reach, which is the whole of it: there is no tier
 // behind this list to hand someone else's script.
-const API: [(&str, &str); 10] = [
+const API: [(&str, &str); 11] = [
     (
         "on_click(id, || ...)",
         "run the body when that node is clicked",
@@ -1305,6 +1329,10 @@ const API: [(&str, &str); 10] = [
     (
         "set_var(name, value)",
         "every {{name}} on the board, in one write",
+    ),
+    (
+        "read_json(file)",
+        "a file the board's data block names, as a map",
     ),
 ];
 
@@ -1885,6 +1913,29 @@ mod tests {
 
     // The ticket's done-when: an invalid script says which line, and a handler
     // that throws says so rather than failing silently on the click.
+    #[test]
+    fn a_handler_reads_a_declared_data_file_and_a_typo_says_so() {
+        let (mut script, mut canvas) = scripted(
+            "on_click(\"n7\", || {\n  set_text(\"n7\", `${read_json(\"monday.json\").temperature}`);\n});",
+        );
+        lock(&script.pending).data = HashMap::from([(
+            "monday.json".to_owned(),
+            Some(serde_json::json!({ "temperature": 17 })),
+        )]);
+        script.fire("n7", &mut canvas);
+        assert_eq!(crate::text::markdown(&canvas.nodes[0]), Some("17"));
+
+        lock(&script.pending).data = HashMap::from([("monday.json".to_owned(), None)]);
+        script.fire("n7", &mut canvas);
+        let e = error(&script, MAIN).expect("not loaded");
+        assert!(e.contains("has not loaded") && e.contains("line 2"), "{e}");
+
+        lock(&script.pending).data.clear();
+        script.fire("n7", &mut canvas);
+        let e = error(&script, MAIN).expect("undeclared");
+        assert!(e.contains("not in the data block"), "{e}");
+    }
+
     #[test]
     fn an_error_says_which_line_it_happened_on() {
         let (script, _) = scripted("on_click(\"n7\", || {\n  set_theme(\"dark\");\n");
