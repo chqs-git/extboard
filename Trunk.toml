@@ -4,3 +4,7 @@ dist = "dist"
 # Content-hashed filenames, so extd can serve the bundle with a long cache
 # header without ever handing a browser a stale wasm.
 filehash = true
+# `--release` alone is `[profile.release]`: opt-level 3, thin LTO, unwinding.
+# That is 33 MB of wasm where `wasm-release` is 14. Set here, not in a deploy
+# script's flags, so every build path gets it.
+cargo_profile = "wasm-release"

@@ -2,11 +2,13 @@ use crate::events::{Events, events, watch};
 use crate::store::{Store, StoreError, secs};
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Request, State};
-use axum::http::header::{CONTENT_TYPE, COOKIE, ETAG, IF_MATCH, IF_NONE_MATCH, SET_COOKIE};
-use axum::http::{HeaderMap, HeaderName, StatusCode};
+use axum::http::header::{
+    CACHE_CONTROL, CONTENT_TYPE, COOKIE, ETAG, IF_MATCH, IF_NONE_MATCH, SET_COOKIE,
+};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{Next, from_fn};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{MethodRouter, any_service, get, post, put};
 use axum::{Form, Json, Router};
 use extboard_core::{Canvas, is_font, is_image, object_mut, rev, url_path, validate};
 use std::collections::HashMap;
@@ -74,9 +76,33 @@ fn app(state: AppState, dist: PathBuf) -> Router {
     router(state, dir).fallback_service(bundle(dist))
 }
 
-fn bundle(dist: PathBuf) -> Compression<ServeDir<ServeFile>> {
+// `precompressed_br` serves the `.br` beside the wasm: deploy brotlis it once
+// at q11 instead of this box streaming q4 over 33 MB on every load, and the
+// response gets a content-length back, so the browser can show progress.
+fn bundle(dist: PathBuf) -> MethodRouter {
     let index = ServeFile::new(dist.join("index.html"));
-    Compression::new(ServeDir::new(dist).fallback(index)).br(true)
+    let files = ServeDir::new(dist).precompressed_br().fallback(index);
+    any_service(Compression::new(files).br(true)).layer(from_fn(cache_bundle))
+}
+
+// Trunk content-hashes the bundle, so those URLs never change contents.
+// index.html names the current hash, and caching it is how a deploy fails to
+// reach an open tab.
+async fn cache_bundle(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let html = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .is_some_and(|kind| kind.as_bytes().starts_with(b"text/html"));
+    let value = if html {
+        "no-cache"
+    } else {
+        "public, max-age=31536000, immutable"
+    };
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static(value));
+    response
 }
 
 fn router(state: AppState, dir: PathBuf) -> Router {
@@ -514,6 +540,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(api.headers()[CONTENT_TYPE], "application/json");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The two halves of the cache story, and the `.br` deploy writes beside
+    // the wasm. Caching index.html pins a tab to the old hash forever.
+    #[tokio::test]
+    async fn the_hashed_bundle_is_immutable_the_index_is_not_and_br_is_preferred() {
+        let dir = std::env::temp_dir().join("extboard-cache-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.html"), "<!doctype html>bundle").unwrap();
+        std::fs::write(dir.join("app-abc123_bg.wasm"), b"raw").unwrap();
+        std::fs::write(dir.join("app-abc123_bg.wasm.br"), b"brotlid").unwrap();
+        let app = || app(state(dir.clone()), dir.clone());
+
+        let index = app()
+            .oneshot(Request::get("/s/anything").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(index.headers()[CACHE_CONTROL], "no-cache");
+
+        let wasm = app()
+            .oneshot(
+                Request::get("/app-abc123_bg.wasm")
+                    .header("accept-encoding", "br")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            wasm.headers()[CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(wasm.headers()[axum::http::header::CONTENT_ENCODING], "br");
+        assert_eq!(
+            wasm.headers()[axum::http::header::CONTENT_LENGTH],
+            "7",
+            "the `.br` from disk, not a stream with no length"
+        );
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
