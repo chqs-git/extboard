@@ -2,12 +2,13 @@ use bevy::diagnostic::FrameCount;
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
 use bevy::text::{EditableText, TextEdit};
-use extboard_core::{NodeKind, PRIMARY_TEXT, is_font, is_image, url_path};
+use extboard_core::{NodeKind, PRIMARY_TEXT, is_font, is_image};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use crate::backend::Io;
 use crate::camera::screen_to_world;
-use crate::client::{Document, base_url};
+use crate::client::Document;
 use crate::theme::write_fonts;
 
 use super::added;
@@ -44,6 +45,7 @@ pub(super) struct Uploads(Arc<Mutex<Vec<Landed>>>);
 pub(super) fn dropped(
     mut dropped: MessageReader<bevy::window::FileDragAndDrop>,
     window: Single<&Window>,
+    io: Res<Io>,
     uploads: Res<Uploads>,
 ) {
     use bevy::window::FileDragAndDrop;
@@ -60,7 +62,7 @@ pub(super) fn dropped(
         match std::fs::read(path_buf) {
             // A drag does not move the cursor on every platform; `landed`
             // falls back to the middle of the view when there is none to read.
-            Ok(bytes) => upload(&uploads, &name, bytes, window.cursor_position()),
+            Ok(bytes) => upload(&io, &uploads, &name, bytes, window.cursor_position()),
             Err(e) => error!("{}: {e}", path_buf.display()),
         }
     }
@@ -86,7 +88,7 @@ fn dimensions(bytes: &[u8]) -> Option<Vec2> {
 
 // extd owns the spaces dir on both targets: the browser cannot write to it at
 // all, and one uploader beats two ways of putting a file in one directory.
-pub(super) fn upload(uploads: &Uploads, name: &str, bytes: Vec<u8>, screen: Option<Vec2>) {
+pub(super) fn upload(io: &Io, uploads: &Uploads, name: &str, bytes: Vec<u8>, screen: Option<Vec2>) {
     if !is_image(name) && !is_font(name) {
         warn!("{name} is neither an image nor a font, so nothing was added");
         return;
@@ -94,23 +96,15 @@ pub(super) fn upload(uploads: &Uploads, name: &str, bytes: Vec<u8>, screen: Opti
     // The bytes are here and nowhere later: extd answers with a path, and the
     // texture the asset server loads is frames away.
     let size = fitted(&bytes);
-    let request = ehttp::Request::post(
-        format!("{}/api/files/{}", base_url(), url_path(name)),
-        bytes,
-    );
-
     let uploads = uploads.clone();
-    ehttp::fetch(request, move |result| match result {
-        // The reply is the path extd settled on, which is not always the name
-        // we sent: it never overwrites.
-        Ok(response) if response.ok => lock(&uploads).push(Landed::File {
-            file: String::from_utf8_lossy(&response.bytes).into_owned(),
-            screen,
-            size,
+    io.upload(
+        name,
+        bytes,
+        Box::new(move |uploaded| match uploaded {
+            Ok(file) => lock(&uploads).push(Landed::File { file, screen, size }),
+            Err(message) => error!("{message}"),
         }),
-        Ok(response) => error!("extd refused the upload: {}", response.status),
-        Err(e) => error!("upload failed: {e}"),
-    });
+    );
 }
 
 pub(super) fn landed(
@@ -193,7 +187,7 @@ fn world(camera: &Camera, cam_global: &GlobalTransform, screen: Option<Vec2>) ->
 // A browser drop is a DOM event: bevy's winit gives us a filename with no
 // bytes behind it, so the page's own listener is what reads the file.
 #[cfg(target_arch = "wasm32")]
-pub(super) fn listen(uploads: Res<Uploads>) {
+pub(super) fn listen(io: Res<Io>, uploads: Res<Uploads>) {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
 
@@ -227,7 +221,7 @@ pub(super) fn listen(uploads: Res<Uploads>) {
     );
     combo.forget();
 
-    let pasting = uploads.clone();
+    let (paste_io, pasting) = (io.clone(), uploads.clone());
     let pasted = Closure::<dyn FnMut(web_sys::ClipboardEvent)>::new(
         move |event: web_sys::ClipboardEvent| {
             let Some(data) = event.clipboard_data() else {
@@ -237,7 +231,7 @@ pub(super) fn listen(uploads: Res<Uploads>) {
                 event.prevent_default();
                 for i in 0..files.length() {
                     if let Some(file) = files.get(i) {
-                        read(&pasting, &file, None);
+                        read(&paste_io, &pasting, &file, None);
                     }
                 }
                 return;
@@ -255,7 +249,7 @@ pub(super) fn listen(uploads: Res<Uploads>) {
     let _ = document.add_event_listener_with_callback("paste", pasted.as_ref().unchecked_ref());
     pasted.forget();
 
-    let uploads = uploads.clone();
+    let (io, uploads) = (io.clone(), uploads.clone());
     let dropped =
         Closure::<dyn FnMut(web_sys::DragEvent)>::new(move |event: web_sys::DragEvent| {
             event.prevent_default();
@@ -267,7 +261,7 @@ pub(super) fn listen(uploads: Res<Uploads>) {
             let at = Vec2::new(event.client_x() as f32, event.client_y() as f32);
             for i in 0..files.length() {
                 if let Some(file) = files.get(i) {
-                    read(&uploads, &file, Some(at));
+                    read(&io, &uploads, &file, Some(at));
                 }
             }
         });
@@ -278,7 +272,7 @@ pub(super) fn listen(uploads: Res<Uploads>) {
 // FileReader rather than a future: it keeps the whole path callback-shaped,
 // the way ehttp already is, and needs no async runtime in the tab.
 #[cfg(target_arch = "wasm32")]
-fn read(uploads: &Uploads, file: &web_sys::File, screen: Option<Vec2>) {
+fn read(io: &Io, uploads: &Uploads, file: &web_sys::File, screen: Option<Vec2>) {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
 
@@ -287,11 +281,12 @@ fn read(uploads: &Uploads, file: &web_sys::File, screen: Option<Vec2>) {
         return;
     };
     let name = file.name();
-    let uploads = uploads.clone();
+    let (io, uploads) = (io.clone(), uploads.clone());
     let done = Closure::<dyn FnMut()>::new({
         let reader = reader.clone();
         move || match reader.result() {
             Ok(buffer) => upload(
+                &io,
                 &uploads,
                 &name,
                 js_sys::Uint8Array::new(&buffer).to_vec(),

@@ -1,3 +1,4 @@
+mod backend;
 mod camera;
 mod client;
 mod dropdown_menu;

@@ -1,10 +1,11 @@
 use bevy::prelude::*;
-use extboard_core::{plain_file, url_path};
+use extboard_core::plain_file;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::client::{Document, Notice, base_url};
+use crate::backend::Io;
+use crate::client::{Document, Notice};
 
 // The board's `vars` with each loaded `data` file merged in under its name.
 #[derive(Resource, Default, PartialEq)]
@@ -37,7 +38,12 @@ impl Plugin for VarsPlugin {
     }
 }
 
-fn request(document: Res<Document>, mut data: ResMut<Data>, mut notice: ResMut<Notice>) {
+fn request(
+    io: Res<Io>,
+    document: Res<Document>,
+    mut data: ResMut<Data>,
+    mut notice: ResMut<Notice>,
+) {
     let declared: Vec<(String, String)> = document
         .0
         .data_files()
@@ -54,15 +60,18 @@ fn request(document: Res<Document>, mut data: ResMut<Data>, mut notice: ResMut<N
             continue;
         }
         let inbox = data.inbox.clone();
-        let (name, file) = (name.clone(), file.clone());
-        let url = format!("{}/f/{}", base_url(), url_path(&file));
-        ehttp::fetch(ehttp::Request::get(url), move |result| {
-            let parsed = parse(result);
-            inbox
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push((name, file, parsed));
-        });
+        let (name, owned) = (name.clone(), file.clone());
+        io.read(
+            file,
+            Box::new(move |read| {
+                let parsed = read
+                    .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string()));
+                inbox
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push((name, owned, parsed));
+            }),
+        );
     }
     data.requested = declared;
 }
@@ -75,14 +84,6 @@ fn fetchable(file: &str) -> Result<(), String> {
         return Err(format!("{file} is not .json"));
     }
     Ok(())
-}
-
-fn parse(result: ehttp::Result<ehttp::Response>) -> Result<Value, String> {
-    let response = result?;
-    if !response.ok {
-        return Err(format!("extd returned {}", response.status));
-    }
-    serde_json::from_slice(&response.bytes).map_err(|e| e.to_string())
 }
 
 fn receive(mut data: ResMut<Data>, mut notice: ResMut<Notice>) {

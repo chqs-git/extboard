@@ -3,6 +3,7 @@ use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 use extboard_core::{Canvas, Node as CanvasNode, NodeKind, fresh_id};
 
+use crate::backend::Io;
 use crate::client::Document;
 use crate::node::{NodeId, NodeKind as Kind, NodeRect, Reselect, to_world};
 use crate::scene::EdgeId;
@@ -169,10 +170,15 @@ pub fn copied(canvas: &Canvas, ids: &[&str]) -> Result<String, serde_json::Error
     serde_json::to_string_pretty(&nodes)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
 pub(super) fn paste(
     keys: Res<ButtonInput<KeyCode>>,
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    io: Res<Io>,
     uploads: Res<Uploads>,
     mut clipboard: ResMut<Clipboard>,
     mut pasting: ResMut<Pasting>,
@@ -185,7 +191,7 @@ pub(super) fn paste(
         }
         None => return,
     };
-    if took_an_image(&mut clipboard, &uploads, screen) {
+    if took_an_image(&mut clipboard, &io, &uploads, screen) {
         return;
     }
     let Some(world) = world else {
@@ -195,12 +201,17 @@ pub(super) fn paste(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn took_an_image(clipboard: &mut Clipboard, uploads: &Uploads, screen: Option<Vec2>) -> bool {
+fn took_an_image(
+    clipboard: &mut Clipboard,
+    io: &Io,
+    uploads: &Uploads,
+    screen: Option<Vec2>,
+) -> bool {
     let Ok(image) = clipboard.fetch_image() else {
         return false;
     };
     match png_bytes(image) {
-        Ok(bytes) => super::drop::upload(uploads, PASTED, bytes, screen),
+        Ok(bytes) => super::drop::upload(io, uploads, PASTED, bytes, screen),
         Err(e) => warn!("paste: {e}"),
     }
     true
@@ -209,7 +220,7 @@ fn took_an_image(clipboard: &mut Clipboard, uploads: &Uploads, screen: Option<Ve
 // The tab reads a pasted image off its own `paste` event instead: arboard, which
 // is what `fetch_image` reads, is not built for wasm. See drop.rs.
 #[cfg(target_arch = "wasm32")]
-fn took_an_image(_: &mut Clipboard, _: &Uploads, _: Option<Vec2>) -> bool {
+fn took_an_image(_: &mut Clipboard, _: &Io, _: &Uploads, _: Option<Vec2>) -> bool {
     false
 }
 
