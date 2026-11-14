@@ -10,7 +10,7 @@ use axum::middleware::{Next, from_fn};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{MethodRouter, any_service, get, post, put};
 use axum::{Form, Json, Router};
-use extboard_core::{Canvas, is_font, is_image, object_mut, rev, url_path, validate};
+use extboard_core::{Canvas, is_font, is_image, rev, url_path, validate};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -237,11 +237,7 @@ async fn list_spaces(State(app): State<AppState>) -> Result<Json<Vec<String>>, S
 // The server names it, because only the server sees the spaces the list hides.
 // The reply is the new id.
 async fn create_untitled(State(app): State<AppState>) -> Result<Response, StoreError> {
-    for n in 1.. {
-        let id = match n {
-            1 => "untitled".to_owned(),
-            n => format!("untitled-{n}"),
-        };
+    for id in (1..).map(extboard_core::untitled) {
         let space = app.store.space(&id)?;
         let mut guard = space.write().await;
         if guard.exists() {
@@ -257,23 +253,11 @@ async fn create_untitled(State(app): State<AppState>) -> Result<Response, StoreE
 // An empty canvas, inside `parent` unless that is empty, starting out in the
 // parent's theme, fonts and saved themes. A parent that is not there is refused.
 async fn child_of(app: &App, parent: &str) -> Result<Canvas, StoreError> {
-    let mut canvas = Canvas::default();
     if parent.is_empty() {
-        return Ok(canvas);
+        return Ok(Canvas::default());
     }
     let from = app.store.space(parent)?.read().await.load()?;
-    if let Some(theme) = from.extra.get("theme") {
-        canvas.extra.insert("theme".into(), theme.clone());
-    }
-    if let Some(themes) = from
-        .extra
-        .get("extboard")
-        .and_then(|extboard| extboard.get("themes"))
-    {
-        object_mut(&mut canvas.extra, "extboard").insert("themes".into(), themes.clone());
-    }
-    canvas.set_parent(parent);
-    Ok(canvas)
+    Ok(extboard_core::child_of(parent, &from))
 }
 
 // Root first, ending at `id`. A loop is no hierarchy at all, so it is the
@@ -353,10 +337,7 @@ async fn create_space(
         guard(&app, parent, &headers).await?;
     }
     let canvas = child_of(&app, parent).await?;
-    let id = match parent {
-        "" => name,
-        parent => format!("{parent}_{name}"),
-    };
+    let id = extboard_core::inner_id(parent, &name);
     let space = app.store.space(&id)?;
     let mut guard = space.write().await;
     if guard.exists() {
@@ -382,14 +363,15 @@ async fn rename_space(
     for child in app.store.list()? {
         let space = app.store.space(&child)?;
         let mut guard = space.write().await;
-        let Ok(mut canvas) = guard.load() else {
+        let Some(canvas) = guard
+            .load()
+            .ok()
+            .and_then(|canvas| extboard_core::reparented(canvas, &id, to))
+        else {
             continue;
         };
-        if canvas.parent() == Some(id.as_str()) {
-            canvas.set_parent(to);
-            let saved = guard.save(&canvas)?;
-            app.events.emit(&child, &saved);
-        }
+        let saved = guard.save(&canvas)?;
+        app.events.emit(&child, &saved);
     }
     Ok(StatusCode::NO_CONTENT)
 }
