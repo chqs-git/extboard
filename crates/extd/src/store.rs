@@ -348,7 +348,7 @@ pub fn secs(time: SystemTime) -> u64 {
 
 // Path traversal boundary: an id is one filename component, never a path.
 fn validate_id(id: &str) -> Result<()> {
-    if id.is_empty() || id.starts_with('.') || id.contains(['/', '\\']) {
+    if !extboard_core::is_space_id(id) {
         return Err(StoreError::BadId(id.to_string()));
     }
     Ok(())

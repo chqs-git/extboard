@@ -5,6 +5,7 @@ pub mod geometry;
 pub mod model;
 pub mod mutate;
 pub mod rev;
+pub mod space;
 pub mod style;
 pub mod theme;
 pub mod validate;
@@ -18,6 +19,7 @@ pub use model::{
 };
 pub use mutate::{PRESET_SLOTS, is_canvas_color};
 pub use rev::{fresh_id, rev};
+pub use space::{child_of, inner_id, is_space_id, reparented, untitled};
 pub use style::{
     DASHES, LEFT_ALIGN, MID_STROKE, SOLID, STROKES, align, dash, stroke_scale, stroke_width,
 };
