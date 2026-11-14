@@ -6,8 +6,8 @@ use extboard_core::{Canvas, NodeKind, space_path};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::client::{Document, Notice, Space, base_url, space_url};
-use crate::lock::keyed;
+use crate::backend::{Io, Loaded, Reply as Answer};
+use crate::client::{Document, Notice, Space};
 use crate::node::{body_color, outline_color};
 use crate::select::PanelRoot;
 use crate::theme::{DARK, Theme};
@@ -180,94 +180,60 @@ fn only_link(text: &str) -> Option<String> {
     (links == 1).then(|| space_path(&dest?).map(str::to_owned))?
 }
 
-fn fetch(pending: &Pending, id: &str) {
-    let (inbox, id) = (pending.0.clone(), id.to_owned());
-    ehttp::fetch(keyed(ehttp::Request::get(space_url(&id))), move |result| {
-        // A map is a nicety: a space that will not load is a plain tile.
-        let canvas = result
-            .ok()
-            .filter(|response| response.ok)
-            .and_then(|response| serde_json::from_slice(&response.bytes).ok());
-        if let Some(canvas) = canvas {
-            lock(&inbox).push(Reply::Fetched(id, canvas));
+fn fetch(io: &Io, pending: &Pending, id: &str) {
+    let reply: Answer<_> = Box::new({
+        let (inbox, id) = (pending.0.clone(), id.to_owned());
+        move |loaded| {
+            // A map is a nicety: a space that will not load is a plain tile.
+            if let Ok(Loaded::Canvas(canvas, _)) = loaded {
+                lock(&inbox).push(Reply::Fetched(id, canvas));
+            }
         }
     });
+    io.get(id, "", reply);
 }
 
-fn refresh(pending: Res<Pending>, space: Res<Space>) {
+fn refresh(io: Res<Io>, pending: Res<Pending>, space: Res<Space>) {
     let inbox = pending.0.clone();
-    let request = ehttp::Request::get(format!("{}/api/spaces", base_url()));
-    ehttp::fetch(request, move |result| {
-        lock(&inbox).push(listed(result));
-    });
+    io.list(Box::new(move |listed| {
+        lock(&inbox).push(listed.map_or_else(Reply::Failed, Reply::Listed));
+    }));
     if let Some(id) = space.id() {
-        let (inbox, id) = (pending.0.clone(), id.to_owned());
-        let request = keyed(ehttp::Request::get(format!("{}/path", space_url(&id))));
-        ehttp::fetch(request, move |result| {
-            let path = result
-                .ok()
-                .filter(|response| response.ok)
-                .and_then(|response| serde_json::from_slice(&response.bytes).ok());
-            // No path is still a breadcrumb: the space alone.
-            lock(&inbox).push(Reply::Path(id.clone(), path.unwrap_or_else(|| vec![id])));
+        let reply: Answer<_> = Box::new({
+            let (inbox, id) = (pending.0.clone(), id.to_owned());
+            move |path: Option<Vec<String>>| {
+                // No path is still a breadcrumb: the space alone.
+                lock(&inbox).push(Reply::Path(id.clone(), path.unwrap_or_else(|| vec![id])));
+            }
         });
+        io.path(id, reply);
     }
 }
 
-fn listed(result: ehttp::Result<ehttp::Response>) -> Reply {
-    match result {
-        Err(e) => Reply::Failed(format!("extd unreachable at {}: {e}", base_url())),
-        Ok(response) if !response.ok => Reply::Failed(format!("extd returned {}", response.status)),
-        Ok(response) => match serde_json::from_slice(&response.bytes) {
-            Ok(ids) => Reply::Listed(ids),
-            Err(e) => Reply::Failed(format!("bad space list from extd: {e}")),
-        },
-    }
-}
-
-// The server names a new space: the list does not show the inner ones, so
-// only it knows which `untitled` is free.
-fn create(pending: &Pending) {
+fn create(io: &Io, pending: &Pending) {
     let inbox = pending.0.clone();
-    let request = ehttp::Request::post(format!("{}/api/spaces", base_url()), Vec::new());
-    ehttp::fetch(request, move |result| {
-        lock(&inbox).push(created(result).map_or_else(Reply::Failed, Reply::Created));
-    });
+    io.create(Box::new(move |created| {
+        lock(&inbox).push(created.map_or_else(Reply::Failed, Reply::Created));
+    }));
 }
 
-// A space called `id` inside `parent`, and a door to it on `parent` at `at`.
-// The server makes the id, `<parent>_<name>`, and answers with it.
-fn create_inner(pending: &Pending, parent: String, name: String, at: Vec2) {
-    let inbox = pending.0.clone();
-    let request = keyed(ehttp::Request::post(
-        space_url(&name),
-        parent.clone().into(),
-    ));
-    ehttp::fetch(request, move |result| {
-        lock(&inbox).push(made_inner(parent, name, at, result));
+// A space called `name` inside `parent`, and a door to it on `parent` at `at`.
+fn create_inner(io: &Io, pending: &Pending, parent: String, name: String, at: Vec2) {
+    let reply: Answer<_> = Box::new({
+        let (inbox, parent, name) = (pending.0.clone(), parent.clone(), name.clone());
+        move |made: Result<String, String>| {
+            lock(&inbox).push(match made {
+                Ok(id) => Reply::Inner {
+                    parent,
+                    name,
+                    id,
+                    at,
+                },
+                Err(message) => Reply::Failed(message),
+            });
+        }
     });
-}
-
-fn made_inner(
-    parent: String,
-    name: String,
-    at: Vec2,
-    result: ehttp::Result<ehttp::Response>,
-) -> Reply {
-    let refused = match &result {
-        Ok(response) if response.status == 409 => Some(format!("{name} already exists here")),
-        Ok(response) if response.status == 400 => Some(format!("{name} is not a usable name")),
-        _ => None,
-    };
-    match (refused, created(result)) {
-        (Some(message), _) | (None, Err(message)) => Reply::Failed(message),
-        (None, Ok(id)) => Reply::Inner {
-            parent,
-            name,
-            id,
-            at,
-        },
-    }
+    io.create_inner(&parent, &name, reply);
 }
 
 // The door to a new inner space: its name, linked. Text rather than a link node,
@@ -289,42 +255,24 @@ fn door_text(name: &str, id: &str) -> String {
     )
 }
 
-fn created(result: ehttp::Result<ehttp::Response>) -> Result<String, String> {
-    match result {
-        Err(e) => Err(format!("extd unreachable at {}: {e}", base_url())),
-        Ok(response) if response.status == 201 => String::from_utf8(response.bytes)
-            .map_err(|_| "extd named the new space in something other than UTF-8".to_owned()),
-        Ok(response) => Err(format!("extd refused a new space: {}", response.status)),
-    }
-}
-
-fn rename(pending: &Pending, from: String, to: String) {
-    let inbox = pending.0.clone();
-    let request = keyed(ehttp::Request::post(
-        format!("{}/rename", space_url(&from)),
-        to.clone().into(),
-    ));
-    ehttp::fetch(request, move |result| {
-        lock(&inbox).push(renamed(from, to, result));
-    });
-}
-
-fn renamed(from: String, to: String, result: ehttp::Result<ehttp::Response>) -> Reply {
-    match result {
-        Err(e) => Reply::Failed(format!("extd unreachable at {}: {e}", base_url())),
-        Ok(response) if response.ok => Reply::Renamed { from, to },
-        Ok(response) if response.status == 409 => Reply::Failed(format!("{to} already exists")),
-        Ok(response) if response.status == 400 => {
-            Reply::Failed(format!("{to} is not a usable name"))
+fn rename(io: &Io, pending: &Pending, from: String, to: String) {
+    let reply: Answer<_> = Box::new({
+        let (inbox, from, to) = (pending.0.clone(), from.clone(), to.clone());
+        move |renamed: Result<(), String>| {
+            lock(&inbox).push(match renamed {
+                Ok(()) => Reply::Renamed { from, to },
+                Err(message) => Reply::Failed(message),
+            });
         }
-        Ok(response) => Reply::Failed(format!("extd refused the rename: {}", response.status)),
-    }
+    });
+    io.rename(&from, &to, reply);
 }
 
 // Enter renames, escape leaves the name as it was.
 fn commit(
     keys: Res<ButtonInput<KeyCode>>,
     fields: Query<&EditableText, With<RenameField>>,
+    io: Res<Io>,
     pending: Res<Pending>,
     mut renaming: ResMut<Renaming>,
 ) {
@@ -344,17 +292,22 @@ fn commit(
     let to = field.value().to_string().trim().to_owned();
     renaming.0 = None;
     if !to.is_empty() && to != from {
-        rename(&pending, from, to);
+        rename(&io, &pending, from, to);
     }
 }
 
 // Enter makes the space, escape or a press anywhere else drops it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a system's arguments are its query"
+)]
 fn name(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     fields: Query<&EditableText, With<NameField>>,
     frames: Res<FrameCount>,
     panel: Res<crate::select::PanelPress>,
+    io: Res<Io>,
     pending: Res<Pending>,
     mut naming: ResMut<Naming>,
 ) {
@@ -379,7 +332,7 @@ fn name(
         return;
     };
     if !id.is_empty() {
-        create_inner(&pending, draft.parent, id, draft.world);
+        create_inner(&io, &pending, draft.parent, id, draft.world);
     }
 }
 
@@ -393,6 +346,7 @@ pub fn typing(focus: Res<InputFocus>, fields: Query<(), With<NameField>>) -> boo
     reason = "a system's arguments are its query"
 )]
 fn receive(
+    io: Res<Io>,
     pending: Res<Pending>,
     frames: Res<FrameCount>,
     mut spaces: ResMut<Spaces>,
@@ -406,7 +360,7 @@ fn receive(
     for reply in batch {
         match reply {
             Reply::Listed(ids) => {
-                ids.iter().for_each(|id| fetch(&pending, id));
+                ids.iter().for_each(|id| fetch(&io, &pending, id));
                 spaces.0 = ids;
                 // A list that arrives clears the one that did not.
                 if notice.0.is_some() {
@@ -554,6 +508,7 @@ fn draw(
 fn pick(
     mut press: On<Pointer<Press>>,
     hits: Query<&Hit>,
+    io: Res<Io>,
     pending: Res<Pending>,
     mut space: ResMut<Space>,
     mut menu: ResMut<Menu>,
@@ -578,7 +533,7 @@ fn pick(
         Hit::Open(id) if renaming.0.as_ref() == Some(id) => {}
         Hit::Open(id) => space.0 = Some(id.clone()),
         Hit::Back => space.0 = None,
-        Hit::New => create(&pending),
+        Hit::New => create(&io, &pending),
         Hit::Crumb(id) => space.0 = Some(id.clone()),
         Hit::Rename(id) => renaming.0 = Some(id.clone()),
     }
@@ -977,43 +932,5 @@ mod tests {
             });
             assert_eq!(space_path(&dest.expect("a link")), Some(id), "{name}");
         }
-    }
-
-    #[test]
-    fn a_list_that_is_not_a_list_is_a_notice_not_a_panic() {
-        let response = |status: u16, body: &str| {
-            Ok(ehttp::Response {
-                url: String::new(),
-                ok: (200..300).contains(&status),
-                status,
-                status_text: String::new(),
-                headers: ehttp::Headers::new(&[]),
-                bytes: body.as_bytes().to_vec(),
-            })
-        };
-        assert!(matches!(
-            listed(response(200, r#"["a","b"]"#)),
-            Reply::Listed(ids) if ids == ["a", "b"]
-        ));
-        assert!(matches!(listed(response(200, "<html>")), Reply::Failed(_)));
-        assert!(matches!(listed(response(500, "")), Reply::Failed(_)));
-        assert!(matches!(
-            listed(Err("connection refused".to_owned())),
-            Reply::Failed(_)
-        ));
-        // The server names the space, in the body.
-        assert_eq!(
-            created(response(201, "untitled-2")),
-            Ok("untitled-2".to_owned())
-        );
-        assert!(created(response(404, "")).is_err());
-        assert!(matches!(
-            renamed("a".to_owned(), "b".to_owned(), response(204, "")),
-            Reply::Renamed { from, to } if from == "a" && to == "b"
-        ));
-        assert!(matches!(
-            renamed("a".to_owned(), "b".to_owned(), response(409, "")),
-            Reply::Failed(message) if message == "b already exists"
-        ));
     }
 }

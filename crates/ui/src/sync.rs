@@ -4,8 +4,8 @@ use extboard_core::{Canvas, rev};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use crate::client::{Document, Notice, Rev, Space, etag_rev, space_url};
-use crate::lock::keyed;
+use crate::backend::{Io, Saved};
+use crate::client::{Document, Notice, Rev, Space};
 
 // A save is the whole document, so the only thing that makes it cheap is not
 // making many: half a second of quiet, however the document was changed.
@@ -125,6 +125,7 @@ fn forget(mut save: ResMut<Save>, mut ticked: ResMut<Ticked>) {
 
 fn send(
     time: Res<Time>,
+    io: Res<Io>,
     document: Res<Document>,
     base: Res<Rev>,
     ticked: Res<Ticked>,
@@ -149,7 +150,7 @@ fn send(
         return;
     }
     save.in_flight = true;
-    put(&save.inbox, &document.0, &base.0, id);
+    put(&io, &save.inbox, &document.0, &base.0, id);
 }
 
 fn adopt(
@@ -208,44 +209,20 @@ fn clear(notice: &mut ResMut<Notice>) {
     }
 }
 
-fn put(inbox: &Inbox, canvas: &Canvas, base: &str, space: &str) {
+fn put(io: &Io, inbox: &Inbox, canvas: &Canvas, base: &str, space: &str) {
     let inbox = inbox.clone();
-    ehttp::fetch(keyed(request(canvas, base, space)), move |result| {
-        lock(&inbox).push(replied(result));
-    });
-}
-
-// The headers are built, not amended: `Headers::insert` appends, and extd reads
-// the first Content-Type, which on a `put` is ehttp's own text/plain.
-fn request(canvas: &Canvas, base: &str, space: &str) -> ehttp::Request {
-    let if_match = format!("\"{base}\"");
-    ehttp::Request {
-        headers: ehttp::Headers::new(&[
-            ("Accept", "*/*"),
-            ("Content-Type", "application/json"),
-            ("If-Match", &if_match),
-        ]),
-        ..ehttp::Request::put(space_url(space), canvas.to_pretty_string().into_bytes())
-    }
-}
-
-fn replied(result: ehttp::Result<ehttp::Response>) -> Reply {
-    let response = match result {
-        Ok(response) => response,
-        Err(e) => return Reply::Failed(format!("save failed: {e}")),
-    };
-    let rev = etag_rev(&response);
-    match response.status {
-        200 | 204 => Reply::Saved(rev),
-        409 => match serde_json::from_slice(&response.bytes) {
-            Ok(canvas) => Reply::Conflict(canvas, rev),
-            Err(e) => Reply::Failed(format!("bad canvas from extd: {e}")),
-        },
-        status => Reply::Failed(format!(
-            "extd refused the save: {status} {}",
-            String::from_utf8_lossy(&response.bytes)
-        )),
-    }
+    io.put(
+        space,
+        canvas,
+        base,
+        Box::new(move |saved| {
+            lock(&inbox).push(match saved {
+                Ok(Saved::Saved(rev)) => Reply::Saved(rev),
+                Ok(Saved::Conflict(canvas, rev)) => Reply::Conflict(canvas, rev),
+                Err(message) => Reply::Failed(message),
+            });
+        }),
+    );
 }
 
 fn lock(inbox: &Inbox) -> std::sync::MutexGuard<'_, Vec<Reply>> {
@@ -258,30 +235,6 @@ mod tests {
 
     // One tick of the check timer, in the units `due` works in.
     const TICK: f32 = 0.1;
-
-    fn response(status: u16, body: &str) -> ehttp::Response {
-        ehttp::Response {
-            url: String::new(),
-            ok: (200..300).contains(&status),
-            status,
-            status_text: String::new(),
-            headers: ehttp::Headers::new(&[("etag", "\"r2\"")]),
-            bytes: body.as_bytes().to_vec(),
-        }
-    }
-
-    // 415 from extd is what a second Content-Type looks like from the outside.
-    #[test]
-    fn a_save_is_one_json_content_type_and_the_rev_it_is_based_on() {
-        let canvas: Canvas = serde_json::from_str(r#"{"nodes":[],"edges":[]}"#).unwrap();
-        let got = request(&canvas, "r1", "a");
-        assert_eq!(
-            got.headers.get_all("content-type").collect::<Vec<_>>(),
-            ["application/json"]
-        );
-        assert_eq!(got.headers.get("if-match"), Some("\"r1\""));
-        assert_eq!(got.method, ehttp::Method::PUT);
-    }
 
     // The ticket's done-when: ten seconds of dragging is one PUT, not six hundred.
     #[test]
@@ -386,27 +339,5 @@ mod tests {
             .set_text("n7", "14:33".to_owned())
             .expect("a text node");
         assert!(dropped(&canvas, &theirs));
-    }
-
-    #[test]
-    fn a_reply_is_the_new_rev_a_conflict_or_a_refusal() {
-        assert!(matches!(
-            replied(Ok(response(204, ""))),
-            Reply::Saved(rev) if rev == "r2"
-        ));
-        let conflict = replied(Ok(response(409, r#"{"nodes":[],"edges":[]}"#)));
-        assert!(
-            matches!(&conflict, Reply::Conflict(canvas, rev) if canvas.nodes.is_empty() && rev == "r2"),
-            "{conflict:?}"
-        );
-        // A validation refusal carries what was wrong, and is not a conflict.
-        assert!(matches!(
-            replied(Ok(response(422, r#"{"errors":["edge e1: node nope does not exist"]}"#))),
-            Reply::Failed(message) if message.contains("does not exist")
-        ));
-        assert!(matches!(
-            replied(Err("connection refused".to_owned())),
-            Reply::Failed(_)
-        ));
     }
 }

@@ -1,9 +1,8 @@
 use bevy::prelude::*;
-use ehttp::streaming::Part;
 use extboard_core::Canvas;
-use std::ops::ControlFlow;
 
-use crate::lock::{Locked, keyed};
+use crate::backend::{Event, Io, Loaded};
+use crate::lock::Locked;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -150,6 +149,7 @@ impl Default for Live {
 impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Space(page_space_id()))
+            .init_resource::<Io>()
             .init_resource::<Live>()
             .init_resource::<Rev>()
             .init_resource::<Notice>()
@@ -165,7 +165,7 @@ impl Plugin for ClientPlugin {
     }
 }
 
-fn connect(time: Res<Time>, mut live: ResMut<Live>, rev: Res<Rev>, space: Res<Space>) {
+fn connect(time: Res<Time>, io: Res<Io>, mut live: ResMut<Live>, rev: Res<Rev>, space: Res<Space>) {
     let Some(id) = space.id() else {
         return;
     };
@@ -174,8 +174,8 @@ fn connect(time: Res<Time>, mut live: ResMut<Live>, rev: Res<Rev>, space: Res<Sp
     }
     // Refetch as well as resubscribe: the file can have moved on while we were
     // not listening.
-    fetch(&live.inbox, &rev.0, id);
-    subscribe(&live.inbox);
+    fetch(&io, &live.inbox, &rev.0, id);
+    subscribe(&io, &live.inbox);
     live.subscribed = true;
 }
 
@@ -188,6 +188,7 @@ fn switch(
     space: Res<Space>,
     mut rev: ResMut<Rev>,
     mut locked: ResMut<Locked>,
+    io: Res<Io>,
     live: Res<Live>,
 ) {
     locked.0 = None;
@@ -196,12 +197,13 @@ fn switch(
     // Not on the first frame: `connect` has not subscribed yet, and its own
     // fetch is the one that lands.
     if let (Some(id), true) = (space.id(), live.subscribed) {
-        fetch(&live.inbox, "", id);
+        fetch(&io, &live.inbox, "", id);
     }
 }
 
 fn apply(
     mut commands: Commands,
+    io: Res<Io>,
     mut live: ResMut<Live>,
     mut rev: ResMut<Rev>,
     mut notice: ResMut<Notice>,
@@ -225,7 +227,7 @@ fn apply(
             // A rev we already hold is our own save echoing back off the disk.
             Update::Changed(_, changed) if changed != rev.0 => {
                 if let Some(id) = space.id() {
-                    fetch(&live.inbox, &rev.0, id);
+                    fetch(&io, &live.inbox, &rev.0, id);
                 }
             }
             Update::Changed(..) => {}
@@ -270,56 +272,21 @@ fn show_notice(
     ));
 }
 
-pub fn space_url(space: &str) -> String {
-    format!("{}/api/spaces/{space}", base_url())
-}
-
-fn fetch(inbox: &Inbox, rev: &str, space: &str) {
-    let mut request = keyed(ehttp::Request::get(space_url(space)));
-    if !rev.is_empty() {
-        request
-            .headers
-            .insert("If-None-Match", format!("\"{rev}\""));
-    }
-
-    let inbox = inbox.clone();
-    let space = space.to_owned();
-    ehttp::fetch(request, move |result| {
-        if let Some(update) = loaded(&space, result) {
+fn fetch(io: &Io, inbox: &Inbox, rev: &str, space: &str) {
+    let (inbox, id) = (inbox.clone(), space.to_owned());
+    io.get(
+        space,
+        rev,
+        Box::new(move |loaded| {
+            let update = match loaded {
+                Ok(Loaded::Canvas(canvas, rev)) => Update::Loaded(id, canvas, rev),
+                Ok(Loaded::Unchanged) => return,
+                Ok(Loaded::Locked(reason)) => Update::Locked(id, reason),
+                Err(message) => Update::Failed(message),
+            };
             lock(&inbox).push(update);
-        }
-    });
-}
-
-fn loaded(space: &str, result: ehttp::Result<ehttp::Response>) -> Option<Update> {
-    // A dead server is a transport error; a live one can still answer 404/500,
-    // which ehttp reports as Ok. Both have to read as a failure.
-    let response = match result {
-        Ok(response) => response,
-        Err(e) => {
-            return Some(Update::Failed(format!(
-                "extd unreachable at {}: {e}",
-                base_url()
-            )));
-        }
-    };
-    if response.status == 304 {
-        return None;
-    }
-    if response.status == 401 {
-        let reason = serde_json::from_slice::<serde_json::Value>(&response.bytes)
-            .ok()
-            .and_then(|body| Some(body.get("error")?.as_str()?.to_owned()))
-            .unwrap_or_else(|| format!("{space} is locked"));
-        return Some(Update::Locked(space.to_owned(), reason));
-    }
-    if !response.ok {
-        return Some(Update::Failed(format!("extd returned {}", response.status)));
-    }
-    Some(match serde_json::from_slice(&response.bytes) {
-        Ok(canvas) => Update::Loaded(space.to_owned(), canvas, etag_rev(&response)),
-        Err(e) => Update::Failed(format!("bad canvas from extd: {e}")),
-    })
+        }),
+    );
 }
 
 impl Update {
@@ -336,83 +303,18 @@ impl Update {
     }
 }
 
-pub fn etag_rev(response: &ehttp::Response) -> String {
-    response
-        .headers
-        .get("etag")
-        .unwrap_or_default()
-        .trim_matches('"')
-        .to_owned()
-}
-
-fn subscribe(inbox: &Inbox) {
-    let mut request = ehttp::Request::get(format!("{}/api/events", base_url()));
-    request.timeout = None; // the stream is meant to stay open
-
+fn subscribe(io: &Io, inbox: &Inbox) {
     let inbox = inbox.clone();
-    let buffer = Mutex::new(String::new());
-    ehttp::streaming::fetch(request, move |part| {
-        let chunk = match part {
-            Ok(Part::Response(response)) if response.ok => return ControlFlow::Continue(()),
-            Ok(Part::Chunk(chunk)) if !chunk.is_empty() => chunk,
-            // An empty chunk is the end of the stream; the rest is extd gone.
-            Ok(_) | Err(_) => {
-                lock(&inbox).push(Update::Disconnected);
-                return ControlFlow::Break(());
-            }
-        };
-
-        let mut buffer = lock_string(&buffer);
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        for frame in drain_frames(&mut buffer) {
-            if let Some((space, rev)) = changed_rev(&frame) {
-                lock(&inbox).push(Update::Changed(space, rev));
-            }
-        }
-        ControlFlow::Continue(())
-    });
-}
-
-fn drain_frames(buffer: &mut String) -> Vec<String> {
-    let mut frames = Vec::new();
-    while let Some(end) = buffer.find("\n\n") {
-        frames.push(buffer[..end].to_owned());
-        buffer.replace_range(..end + 2, "");
-    }
-    frames
-}
-
-// `(space, rev)`. A lagged stream names neither, and an empty rev is one no
-// client can be holding, so it reads as a change to whatever is open.
-fn changed_rev(frame: &str) -> Option<(String, String)> {
-    let mut changed = false;
-    let mut data = None;
-    for line in frame.lines() {
-        if let Some(name) = line.strip_prefix("event:") {
-            changed = name.trim() == "changed";
-        }
-        if let Some(payload) = line.strip_prefix("data:") {
-            data = Some(payload.trim().to_owned());
-        }
-    }
-    if !changed {
-        return None;
-    }
-
-    let data: serde_json::Value = serde_json::from_str(&data?).ok()?;
-    match (data.get("space"), data.get("rev")) {
-        (Some(space), Some(rev)) => Some((space.as_str()?.to_owned(), rev.as_str()?.to_owned())),
-        (None, None) => Some((String::new(), String::new())),
-        _ => None,
-    }
+    io.subscribe(Box::new(move |event| {
+        lock(&inbox).push(match event {
+            Event::Changed(space, rev) => Update::Changed(space, rev),
+            Event::Disconnected => Update::Disconnected,
+        });
+    }));
 }
 
 fn lock(inbox: &Inbox) -> std::sync::MutexGuard<'_, Vec<Update>> {
     inbox.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-fn lock_string(buffer: &Mutex<String>) -> std::sync::MutexGuard<'_, String> {
-    buffer.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -432,78 +334,10 @@ mod tests {
         );
     }
 
-    fn response(status: u16, body: &str) -> ehttp::Response {
-        ehttp::Response {
-            url: String::new(),
-            ok: (200..300).contains(&status),
-            status,
-            status_text: String::new(),
-            headers: ehttp::Headers::new(&[("etag", "\"r1\"")]),
-            bytes: body.as_bytes().to_vec(),
-        }
-    }
-
+    // `apply` is what decides whether we care: only a space we have open is
+    // `Update::space`'s.
     #[test]
-    fn every_failure_carries_a_message() {
-        let failed = |result| matches!(loaded("a", result), Some(Update::Failed(_)));
-        // Server down: this is the case that used to panic off-thread.
-        assert!(failed(Err("connection refused".to_owned())));
-        // Server up, space missing: ehttp calls this Ok.
-        assert!(failed(Ok(response(404, "not found"))));
-        assert!(failed(Ok(response(200, "<html>"))));
-    }
-
-    #[test]
-    fn a_load_carries_the_etags_rev_and_304_carries_nothing() {
-        let got = loaded("a", Ok(response(200, r#"{"nodes":[],"edges":[]}"#)));
-        assert!(
-            matches!(&got, Some(Update::Loaded(space, _, rev)) if space == "a" && rev == "r1"),
-            "{got:?}"
-        );
-        assert!(loaded("a", Ok(response(304, ""))).is_none());
-        let locked = loaded(
-            "a",
-            Ok(response(401, r#"{"error":"wrong password for a"}"#)),
-        );
-        assert!(
-            matches!(&locked, Some(Update::Locked(space, why)) if space == "a" && why == "wrong password for a"),
-            "{locked:?}"
-        );
-    }
-
-    #[test]
-    fn frames_survive_being_split_across_chunks() {
-        let mut buffer = String::new();
-        buffer.push_str(":ping\n\nevent: changed\ndata: {\"space\":\"a\",\"re");
-        assert_eq!(drain_frames(&mut buffer), [":ping"]);
-
-        buffer.push_str("v\":\"r2\"}\n\n");
-        let frames = drain_frames(&mut buffer);
-        assert_eq!(frames.len(), 1);
-        assert_eq!(
-            changed_rev(&frames[0]),
-            Some(("a".to_owned(), "r2".to_owned()))
-        );
-        assert!(buffer.is_empty());
-    }
-
-    // Which space a change is about is the frame's to say; `apply` is what
-    // decides whether we care. Only a space we have open is `Update::space`'s.
-    #[test]
-    fn a_change_carries_its_space_and_only_the_open_one_is_ours() {
-        let frame = |data: &str| format!("event: changed\ndata: {data}");
-        assert_eq!(
-            changed_rev(&frame(r#"{"space":"b","rev":"r2"}"#)),
-            Some(("b".to_owned(), "r2".to_owned()))
-        );
-        assert_eq!(changed_rev(":ping"), None);
-        assert_eq!(changed_rev("event: hello\ndata: {}"), None);
-        // Lagged: no space and no rev to compare, so it is a change to ours.
-        assert_eq!(
-            changed_rev(&frame("{}")),
-            Some((String::new(), String::new()))
-        );
-
+    fn only_the_open_space_is_ours() {
         let about = |space: &str| {
             Update::Changed(space.to_owned(), "r2".to_owned())
                 .space()
