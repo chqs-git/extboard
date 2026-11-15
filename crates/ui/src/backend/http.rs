@@ -128,7 +128,7 @@ impl Backend for Http {
 }
 
 fn space_url(space: &str) -> String {
-    format!("{}/api/spaces/{space}", base_url())
+    format!("{}/api/spaces/{}", base_url(), url_path(space))
 }
 
 fn unreachable(e: impl Display) -> String {
@@ -361,6 +361,14 @@ mod tests {
         assert_eq!(
             renamed("b", response(409, "")),
             Err("b already exists".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_space_id_is_encoded_into_its_url() {
+        assert_eq!(
+            space_url("untitled_inner test#2"),
+            format!("{}/api/spaces/untitled_inner%20test%232", base_url())
         );
     }
 

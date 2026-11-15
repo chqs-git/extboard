@@ -87,14 +87,16 @@ fn bundle(dist: PathBuf) -> MethodRouter {
 
 // Trunk content-hashes the bundle, so those URLs never change contents.
 // index.html names the current hash, and caching it is how a deploy fails to
-// reach an open tab.
+// reach an open tab. A `/snippets/` path is hashed from the crate, not the
+// contents, so it changes under one URL and fails index.html's integrity check.
 async fn cache_bundle(request: Request, next: Next) -> Response {
+    let snippet = request.uri().path().starts_with("/snippets/");
     let mut response = next.run(request).await;
     let html = response
         .headers()
         .get(CONTENT_TYPE)
         .is_some_and(|kind| kind.as_bytes().starts_with(b"text/html"));
-    let value = if html {
+    let value = if html || snippet {
         "no-cache"
     } else {
         "public, max-age=31536000, immutable"
@@ -534,6 +536,8 @@ mod tests {
         std::fs::write(dir.join("index.html"), "<!doctype html>bundle").unwrap();
         std::fs::write(dir.join("app-abc123_bg.wasm"), b"raw").unwrap();
         std::fs::write(dir.join("app-abc123_bg.wasm.br"), b"brotlid").unwrap();
+        std::fs::create_dir_all(dir.join("snippets/app-81a4")).unwrap();
+        std::fs::write(dir.join("snippets/app-81a4/inline0.js"), "export {}").unwrap();
         let app = || app(state(dir.clone()), dir.clone());
 
         let index = app()
@@ -541,6 +545,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(index.headers()[CACHE_CONTROL], "no-cache");
+
+        let snippet = app()
+            .oneshot(
+                Request::get("/snippets/app-81a4/inline0.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snippet.headers()[CACHE_CONTROL], "no-cache");
 
         let wasm = app()
             .oneshot(

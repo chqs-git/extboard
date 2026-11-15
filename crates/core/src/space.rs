@@ -13,6 +13,14 @@ pub fn untitled(n: usize) -> String {
     }
 }
 
+pub fn nth_name(name: &str, n: u32) -> String {
+    match (n, name.rsplit_once('.')) {
+        (0, _) => name.to_owned(),
+        (n, Some((stem, ext))) => format!("{stem}-{n}.{ext}"),
+        (n, None) => format!("{name}-{n}"),
+    }
+}
+
 // `<parent>_<name>`, so two parents can each have a `notes`.
 pub fn inner_id(parent: &str, name: &str) -> String {
     match parent {
@@ -67,6 +75,11 @@ mod tests {
             ["untitled", "untitled-2", "untitled-3"]
         );
         assert_eq!(inner_id("", "notes"), "notes");
+        assert_eq!(
+            (0..3).map(|n| nth_name("a.b.jpg", n)).collect::<Vec<_>>(),
+            ["a.b.jpg", "a.b-1.jpg", "a.b-2.jpg"]
+        );
+        assert_eq!(nth_name("README", 2), "README-2");
         assert_eq!(inner_id("untitled-2", "notes"), "untitled-2_notes");
     }
 
