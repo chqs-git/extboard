@@ -42,7 +42,10 @@ fn spaces_file(base: Option<&str>, file: &str) -> String {
 
 #[cfg(target_arch = "wasm32")]
 pub fn asset_path(file: &str) -> String {
-    file.to_owned()
+    match crate::backend::folder_mode() {
+        true => format!("folder://{file}"),
+        false => file.to_owned(),
+    }
 }
 const RETRY_SECS: f32 = 2.0;
 
