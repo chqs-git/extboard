@@ -1,3 +1,4 @@
+use bevy::asset::io::{AssetReader, AssetReaderError, PathStream, Reader, VecReader};
 use bevy::prelude::*;
 use extboard_core::{
     Canvas, child_of, inner_id, is_font, is_image, is_space_id, nth_name, reparented, untitled,
@@ -6,6 +7,8 @@ use extboard_core::{
 use js_sys::{Function, Promise, Reflect, Uint8Array};
 use std::cell::RefCell;
 use std::future::Future;
+use std::path::Path;
+use std::sync::Arc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
@@ -319,6 +322,46 @@ impl Backend for Folder {
             }
             unreachable!("0.. never runs out")
         });
+    }
+}
+
+// File nodes and theme fonts, as `folder://images/x.png`.
+pub struct FolderReader;
+
+impl AssetReader for FolderReader {
+    async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
+        let failed = |e: String| AssetReaderError::Io(Arc::new(std::io::Error::other(e)));
+        let missing = || AssetReaderError::NotFound(path.to_owned());
+        let mut parts: Vec<&str> = path.iter().filter_map(|part| part.to_str()).collect();
+        let name = parts.pop().ok_or_else(missing)?;
+        let mut dir = root().await;
+        for part in parts {
+            dir = match JsFuture::from(dir.get_directory_handle(part)).await {
+                Ok(sub) => sub.unchecked_into(),
+                Err(e) if not_found(&e) => return Err(missing()),
+                Err(e) => return Err(failed(message(e))),
+            };
+        }
+        let bytes = read(&dir, name)
+            .await
+            .map_err(failed)?
+            .ok_or_else(missing)?;
+        Ok(VecReader::new(bytes))
+    }
+
+    async fn read_meta<'a>(&'a self, path: &'a Path) -> Result<VecReader, AssetReaderError> {
+        Err(AssetReaderError::NotFound(path.to_owned()))
+    }
+
+    async fn read_directory<'a>(
+        &'a self,
+        path: &'a Path,
+    ) -> Result<Box<PathStream>, AssetReaderError> {
+        Err(AssetReaderError::NotFound(path.to_owned()))
+    }
+
+    async fn is_directory<'a>(&'a self, _: &'a Path) -> Result<bool, AssetReaderError> {
+        Ok(false)
     }
 }
 

@@ -56,8 +56,14 @@ fn main() {
         silence_startup_warning: true,
     });
 
-    App::new()
-        .add_plugins(plugins)
+    let mut app = App::new();
+    // Before `DefaultPlugins`, which is where the asset server is built.
+    #[cfg(target_arch = "wasm32")]
+    app.register_asset_source(
+        "folder",
+        bevy::asset::io::AssetSourceBuilder::new(|| Box::new(backend::FolderReader)),
+    );
+    app.add_plugins(plugins)
         .insert_resource(ClearColor(theme::DARK))
         .add_plugins((
             camera::CameraPlugin,
@@ -83,6 +89,6 @@ fn main() {
                 undo::UndoPlugin,
                 vars::VarsPlugin,
             ),
-        ))
-        .run();
+        ));
+    app.run();
 }

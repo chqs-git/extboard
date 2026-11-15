@@ -7,7 +7,7 @@ use extboard_core::Canvas;
 use std::sync::Arc;
 
 #[cfg(target_arch = "wasm32")]
-pub use folder::FolderPlugin;
+pub use folder::{FolderPlugin, FolderReader, chosen as folder_mode};
 
 // Natively a reply lands on ehttp's thread, so each one pushes into the inbox a
 // system already drains.
