@@ -89,12 +89,15 @@ fn page_space_id() -> Option<String> {
 
 #[cfg(target_arch = "wasm32")]
 fn track_url(space: Res<Space>) {
-    let Some(history) = web_sys::window().and_then(|window| window.history().ok()) else {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let (Ok(history), Ok(search)) = (window.history(), window.location().search()) else {
         return;
     };
     let path = match space.id() {
-        Some(id) => format!("/s/{}", extboard_core::url_path(id)),
-        None => "/".to_owned(),
+        Some(id) => format!("/s/{}{search}", extboard_core::url_path(id)),
+        None => format!("/{search}"),
     };
     let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&path));
 }
@@ -161,7 +164,8 @@ impl Plugin for ClientPlugin {
                 ),
             );
         #[cfg(target_arch = "wasm32")]
-        app.add_systems(Update, track_url.run_if(resource_changed::<Space>));
+        app.add_plugins(crate::backend::FolderPlugin)
+            .add_systems(Update, track_url.run_if(resource_changed::<Space>));
     }
 }
 

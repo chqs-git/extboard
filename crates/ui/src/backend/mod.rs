@@ -1,8 +1,13 @@
+#[cfg(target_arch = "wasm32")]
+mod folder;
 mod http;
 
 use bevy::prelude::*;
 use extboard_core::Canvas;
 use std::sync::Arc;
+
+#[cfg(target_arch = "wasm32")]
+pub use folder::FolderPlugin;
 
 // Natively a reply lands on ehttp's thread, so each one pushes into the inbox a
 // system already drains.
@@ -53,6 +58,10 @@ pub struct Io(Arc<dyn Backend + Send + Sync>);
 
 impl Default for Io {
     fn default() -> Self {
+        #[cfg(target_arch = "wasm32")]
+        if folder::chosen() {
+            return Self(Arc::new(folder::Folder));
+        }
         Self(Arc::new(http::Http))
     }
 }

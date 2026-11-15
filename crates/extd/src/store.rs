@@ -117,7 +117,7 @@ impl Store {
         validate_id(name)?;
         let dir = self.dir.join(sub);
         fs::create_dir_all(&dir)?;
-        Ok(format!("{sub}/{}", write_new(&dir, name.as_ref(), bytes)?))
+        Ok(format!("{sub}/{}", write_new(&dir, name, bytes)?))
     }
 
     // Under both locks, taken in id order so two renames crossing each other
@@ -297,17 +297,9 @@ impl Store {
 // Never overwrite: two different photos both called `IMG_0001.jpg` have to
 // land. `create_new` rather than a prior `exists` check, because a multi-file
 // drop uploads them at once and both would pick the same free name.
-fn write_new(dir: &std::path::Path, name: &std::path::Path, bytes: &[u8]) -> io::Result<String> {
-    let stem = name.file_stem().unwrap_or_default().to_string_lossy();
-    let ext = match name.extension() {
-        Some(ext) => format!(".{}", ext.to_string_lossy()),
-        None => String::new(),
-    };
+fn write_new(dir: &std::path::Path, name: &str, bytes: &[u8]) -> io::Result<String> {
     for n in 0u32.. {
-        let candidate = match n {
-            0 => format!("{stem}{ext}"),
-            n => format!("{stem}-{n}{ext}"),
-        };
+        let candidate = extboard_core::nth_name(name, n);
         match fs::File::create_new(dir.join(&candidate)) {
             Ok(mut file) => {
                 file.write_all(bytes)?;
