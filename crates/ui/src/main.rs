@@ -3,6 +3,8 @@ mod camera;
 mod client;
 mod dropdown_menu;
 mod edit;
+#[cfg(target_arch = "wasm32")]
+mod home;
 mod hud;
 mod icon;
 mod lock;
@@ -90,5 +92,7 @@ fn main() {
                 vars::VarsPlugin,
             ),
         ));
+    #[cfg(target_arch = "wasm32")]
+    app.add_plugins(home::HomePlugin);
     app.run();
 }
