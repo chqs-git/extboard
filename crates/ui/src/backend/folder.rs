@@ -4,8 +4,8 @@ use extboard_core::{
     Canvas, child_of, inner_id, is_font, is_image, is_space_id, nth_name, reparented, untitled,
     validate,
 };
-use js_sys::{Function, Promise, Reflect, Uint8Array};
-use std::cell::RefCell;
+use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use web_sys::{
 };
 
 use super::{Backend, Event, Loaded, Reply, Saved};
-use crate::client::{Notice, page_space_id};
+use crate::client::page_space_id;
 
 #[wasm_bindgen(inline_js = r#"
 function db() {
@@ -38,6 +38,29 @@ export async function pick() {
   await idb('readwrite', s => s.put(h, 'root'));
   return h;
 }
+export function canPick() { return 'showDirectoryPicker' in self; }
+// The private dir's handle is not stored, only that it was chosen.
+export async function browser() {
+  const h = await navigator.storage.getDirectory();
+  await idb('readwrite', s => s.put('browser', 'root')).catch(() => {});
+  return h;
+}
+export function choose() {
+  return new Promise(ok => {
+    const input = document.createElement('input');
+    Object.assign(input, { type: 'file', accept: '.canvas', multiple: true });
+    input.onchange = () => ok([...input.files]);
+    input.oncancel = () => ok([]);
+    input.click();
+  });
+}
+export function download(name, bytes) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/json' }));
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href));
+}
 export async function stored() { return (await idb('readonly', s => s.get('root'))) ?? null; }
 export function query(h) { return h.queryPermission({ mode: 'readwrite' }); }
 export function request(h) { return h.requestPermission({ mode: 'readwrite' }); }
@@ -45,6 +68,11 @@ export function sleep(ms) { return new Promise(ok => setTimeout(ok, ms)); }
 "#)]
 extern "C" {
     fn pick() -> Promise;
+    #[wasm_bindgen(js_name = canPick)]
+    pub fn can_pick() -> bool;
+    fn browser() -> Promise;
+    fn choose() -> Promise;
+    fn download(name: &str, bytes: &Uint8Array);
     fn stored() -> Promise;
     fn query(handle: &FileSystemDirectoryHandle) -> Promise;
     fn request(handle: &FileSystemDirectoryHandle) -> Promise;
@@ -57,8 +85,23 @@ pub fn chosen() -> bool {
         .is_some_and(|search| search.contains("folder"))
 }
 
+// Where the spaces live: the folder on disk, or the browser's private storage.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Home {
+    Folder,
+    Browser,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Start {
+    Loading,
+    Choose,
+    Reconnect,
+    Open(Home),
+}
+
 enum Waiting {
-    Pick,
+    Choose,
     Reconnect(FileSystemDirectoryHandle),
 }
 
@@ -69,9 +112,33 @@ thread_local! {
         (opened, resolve.expect("the executor runs synchronously"))
     };
     static WAITING: RefCell<Option<Waiting>> = const { RefCell::new(None) };
+    static HOME: Cell<Option<Home>> = const { Cell::new(None) };
+    // A space imported, to open, or what went wrong.
+    static NEWS: RefCell<Vec<Result<String, String>>> = const { RefCell::new(Vec::new()) };
 }
 
-fn open(dir: FileSystemDirectoryHandle) {
+pub fn start() -> Start {
+    if let Some(home) = HOME.get() {
+        return Start::Open(home);
+    }
+    WAITING.with_borrow(|waiting| match waiting {
+        None => Start::Loading,
+        Some(Waiting::Choose) => Start::Choose,
+        Some(Waiting::Reconnect(_)) => Start::Reconnect,
+    })
+}
+
+pub fn news() -> Vec<Result<String, String>> {
+    NEWS.take()
+}
+
+fn tell(news: Result<String, String>) {
+    NEWS.with_borrow_mut(|all| all.push(news));
+}
+
+fn open(dir: FileSystemDirectoryHandle, home: Home) {
+    WAITING.set(None);
+    HOME.set(Some(home));
     OPENED.with(|(_, resolve)| {
         let _ = resolve.call1(&JsValue::NULL, &dir);
     });
@@ -90,7 +157,7 @@ pub struct FolderPlugin;
 impl Plugin for FolderPlugin {
     fn build(&self, app: &mut App) {
         if chosen() {
-            app.add_systems(Startup, restore).add_systems(Update, ask);
+            app.add_systems(Startup, restore);
         }
     }
 }
@@ -98,61 +165,116 @@ impl Plugin for FolderPlugin {
 fn restore() {
     spawn_local(async {
         let waiting = match JsFuture::from(stored()).await {
+            Ok(home) if home.as_string().as_deref() == Some("browser") => {
+                return keep_in_browser();
+            }
             Ok(dir) if !dir.is_null() => {
                 let dir: FileSystemDirectoryHandle = dir.unchecked_into();
                 let state = JsFuture::from(query(&dir)).await.ok();
                 if state.and_then(|state| state.as_string()).as_deref() == Some("granted") {
-                    return open(dir);
+                    return open(dir, Home::Folder);
                 }
                 Waiting::Reconnect(dir)
             }
-            _ => Waiting::Pick,
+            _ => Waiting::Choose,
         };
         WAITING.set(Some(waiting));
     });
 }
 
-// The call has to happen in the system that sees the click, or the activation is gone.
-fn ask(
-    buttons: Res<ButtonInput<MouseButton>>,
-    mut notice: ResMut<Notice>,
-    mut shown: Local<Option<&'static str>>,
-) {
-    let Some(waiting) = WAITING.take() else {
-        if let Some(text) = shown.take()
-            && notice.0.as_deref() == Some(text)
-        {
-            notice.0 = None;
-        }
-        return;
-    };
-    if !buttons.just_pressed(MouseButton::Left) {
-        let text = match &waiting {
-            Waiting::Pick => "Click to open your extboard folder",
-            Waiting::Reconnect(_) => "Click to reconnect ~/extboard",
-        };
-        if *shown != Some(text) {
-            notice.0 = Some(text.to_owned());
-            *shown = Some(text);
-        }
-        WAITING.set(Some(waiting));
-        return;
-    }
-    let asked = match &waiting {
-        Waiting::Pick => pick(),
-        Waiting::Reconnect(dir) => request(dir),
-    };
+// This one and `reconnect` are called from the system that sees the click, or
+// the activation is gone. Nothing is awaited before the call.
+pub fn open_folder() {
+    let asked = pick();
     spawn_local(async move {
-        match (JsFuture::from(asked).await, waiting) {
-            (Ok(dir), Waiting::Pick) => open(dir.unchecked_into()),
-            (Ok(state), Waiting::Reconnect(dir))
-                if state.as_string().as_deref() == Some("granted") =>
-            {
-                open(dir);
-            }
-            (_, waiting) => WAITING.set(Some(waiting)),
+        if let Ok(dir) = JsFuture::from(asked).await {
+            open(dir.unchecked_into(), Home::Folder);
         }
     });
+}
+
+pub fn reconnect() {
+    let Some(dir) = WAITING.with_borrow(|waiting| match waiting {
+        Some(Waiting::Reconnect(dir)) => Some(dir.clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+    let asked = request(&dir);
+    spawn_local(async move {
+        let state = JsFuture::from(asked).await.ok();
+        if state.and_then(|state| state.as_string()).as_deref() == Some("granted") {
+            open(dir, Home::Folder);
+        }
+    });
+}
+
+// Private browsing in Firefox refuses it; the start screen stays up.
+pub fn keep_in_browser() {
+    spawn_local(async {
+        match wait(browser()).await {
+            Ok(dir) => open(dir, Home::Browser),
+            Err(e) => {
+                WAITING.with_borrow_mut(|waiting| {
+                    waiting.get_or_insert(Waiting::Choose);
+                });
+                tell(Err(format!("no browser storage here: {e}")));
+            }
+        }
+    });
+}
+
+pub fn export(space: String) {
+    spawn_local(async move {
+        let name = file_of(&space);
+        match read(&root().await, &name).await {
+            Ok(Some(bytes)) => download(&name, &Uint8Array::from(&bytes[..])),
+            Ok(None) => tell(Err(format!("no space {space}"))),
+            Err(e) => tell(Err(e)),
+        }
+    });
+}
+
+// Called from the click, like `open_folder`: the file dialog needs it too.
+pub fn import() {
+    let chosen = choose();
+    spawn_local(async move {
+        let Ok(files) = JsFuture::from(chosen).await else {
+            return;
+        };
+        let dir = root().await;
+        for file in Array::from(&files) {
+            tell(import_one(&dir, &file.unchecked_into()).await);
+        }
+    });
+}
+
+// Never over a space already there: `x.canvas` lands as `x-1` beside it.
+async fn import_one(dir: &FileSystemDirectoryHandle, file: &File) -> Result<String, String> {
+    let name = file.name();
+    let stem = name.strip_suffix(".canvas").unwrap_or(&name);
+    let buffer: JsValue = wait(file.array_buffer()).await?;
+    let canvas: Canvas = serde_json::from_slice(&Uint8Array::new(&buffer).to_vec())
+        .map_err(|e| format!("{name} is not a canvas: {e}"))?;
+    checked(&canvas)?;
+    for n in 0.. {
+        let id = nth_name(stem, n);
+        if !is_space_id(&id) {
+            return Err(format!("{name} is not a usable name"));
+        }
+        if !exists(dir, &file_of(&id)).await? {
+            save(dir, &id, &canvas).await?;
+            return Ok(id);
+        }
+    }
+    unreachable!("0.. never runs out")
+}
+
+fn checked(canvas: &Canvas) -> Result<(), String> {
+    validate(canvas).map_err(|errors| {
+        let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        format!("refused the save: {}", errors.join("; "))
+    })
 }
 
 pub struct Folder;
@@ -215,10 +337,7 @@ impl Backend for Folder {
             if rev != base {
                 return Ok(Saved::Conflict(current, rev));
             }
-            if let Err(errors) = validate(&canvas) {
-                let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
-                return Err(format!("refused the save: {}", errors.join("; ")));
-            }
+            checked(&canvas)?;
             save(&dir, &space, &canvas).await.map(Saved::Saved)
         });
     }

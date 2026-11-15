@@ -1,5 +1,5 @@
 #[cfg(target_arch = "wasm32")]
-mod folder;
+pub mod folder;
 mod http;
 
 use bevy::prelude::*;

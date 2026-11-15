@@ -25,7 +25,7 @@ const PAD: f32 = 24.0;
 const CHIP_TOP: f32 = 8.0;
 
 pub const TILE_BG: Color = Color::srgb(0.16, 0.17, 0.21);
-const HOVER: Color = Color::srgb(0.22, 0.24, 0.3);
+pub const HOVER: Color = Color::srgb(0.22, 0.24, 0.3);
 pub const EDGE: Color = Color::srgb(0.25, 0.27, 0.32);
 const EDGE_HOVER: Color = Color::srgb(0.45, 0.5, 0.6);
 // Under a tile's name, so it reads over the map.
