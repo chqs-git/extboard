@@ -80,7 +80,7 @@ impl Space {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn page_space_id() -> Option<String> {
+pub(crate) fn page_space_id() -> Option<String> {
     let path = web_sys::window()?.location().pathname().ok()?;
     Some(extboard_core::space_path(&path)?.to_owned())
 }

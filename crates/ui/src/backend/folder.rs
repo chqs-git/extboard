@@ -18,7 +18,7 @@ use web_sys::{
 };
 
 use super::{Backend, Event, Loaded, Reply, Saved};
-use crate::client::Notice;
+use crate::client::{Notice, page_space_id};
 
 #[wasm_bindgen(inline_js = r#"
 function db() {
@@ -41,12 +41,14 @@ export async function pick() {
 export async function stored() { return (await idb('readonly', s => s.get('root'))) ?? null; }
 export function query(h) { return h.queryPermission({ mode: 'readwrite' }); }
 export function request(h) { return h.requestPermission({ mode: 'readwrite' }); }
+export function sleep(ms) { return new Promise(ok => setTimeout(ok, ms)); }
 "#)]
 extern "C" {
     fn pick() -> Promise;
     fn stored() -> Promise;
     fn query(handle: &FileSystemDirectoryHandle) -> Promise;
     fn request(handle: &FileSystemDirectoryHandle) -> Promise;
+    fn sleep(ms: u32) -> Promise;
 }
 
 pub fn chosen() -> bool {
@@ -176,7 +178,33 @@ impl Backend for Folder {
         });
     }
 
-    fn subscribe(&self, _: Box<dyn Fn(Event) + Send>) {}
+    fn subscribe(&self, on: Box<dyn Fn(Event) + Send>) {
+        spawn_local(async move {
+            let dir = root().await;
+            let mut seen: Option<(String, f64)> = None;
+            loop {
+                let _ = JsFuture::from(sleep(1000)).await;
+                let Some(space) = page_space_id() else {
+                    continue;
+                };
+                let Ok(Some(file)) = handle(&dir, &file_of(&space)).await else {
+                    continue;
+                };
+                let Ok(file) = wait::<File>(file.get_file()).await else {
+                    continue;
+                };
+                let modified = file.last_modified();
+                // A space just opened was just fetched: only a later change is news.
+                if let Some((was, at)) = &seen
+                    && *was == space
+                    && *at != modified
+                {
+                    on(Event::Changed(space.clone(), modified.to_string()));
+                }
+                seen = Some((space, modified));
+            }
+        });
+    }
 
     // The rev check and the write have no lock between them: a writer in that gap loses (E10-T9).
     fn put(&self, space: &str, canvas: &Canvas, base: &str, reply: Reply<Result<Saved, String>>) {
